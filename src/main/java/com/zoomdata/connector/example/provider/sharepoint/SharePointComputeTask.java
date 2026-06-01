@@ -1,0 +1,318 @@
+/**
+ * Copyright (C) insightsoftware 2026. All rights reserved.
+ *
+ * Executes a single fetch against a SharePoint List (or Excel table) and
+ * returns rows as Thrift Records.
+ *
+ * Pushdown to Graph: OData $filter, $select, $top for Lists. Excel tables
+ * fetch raw and let the QE filter. AND-composed EDC filters become a
+ * conjunction; unsupported filter types are skipped and applied by the QE.
+ */
+package com.zoomdata.connector.example.provider.sharepoint;
+
+import com.microsoft.graph.models.FieldValueSet;
+import com.microsoft.graph.models.ListItem;
+import com.microsoft.graph.models.ListItemCollectionResponse;
+import com.microsoft.graph.serviceclient.GraphServiceClient;
+import com.zoomdata.connector.example.framework.async.Cursor;
+import com.zoomdata.connector.example.framework.async.IComputeTask;
+import com.zoomdata.gen.edc.filter.Filter;
+import com.zoomdata.gen.edc.filter.FilterFunction;
+import com.zoomdata.gen.edc.types.Field;
+import com.zoomdata.gen.edc.types.FieldType;
+import com.zoomdata.gen.edc.types.Record;
+import com.zoomdata.gen.edc.types.ResponseMetadata;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.stream.Collectors;
+
+public class SharePointComputeTask implements IComputeTask {
+
+    private static final Logger log = LoggerFactory.getLogger(SharePointComputeTask.class);
+
+    private final GraphServiceClient client;
+    private final String siteId;
+    private final String collectionName;
+    private final List<String> requestedFields;
+    private final SharePointTypesMapping typesMapping;
+    private final SharePointIntrospector introspector;
+    private final int fetchSize;
+    private final List<Filter> filters;
+
+    private volatile boolean cancelled = false;
+    private volatile double progress = 0.0;
+    private List<Record> records;
+    private List<ResponseMetadata> metadata;
+    private List<String> resolvedFieldOrder;
+
+    public SharePointComputeTask(GraphServiceClient client, String siteId,
+                                  String collectionName, List<String> requestedFields,
+                                  SharePointTypesMapping typesMapping,
+                                  SharePointIntrospector introspector,
+                                  int fetchSize, List<Filter> filters) {
+        this.client = client;
+        this.siteId = siteId;
+        this.collectionName = collectionName;
+        this.requestedFields = requestedFields;
+        this.typesMapping = typesMapping;
+        this.introspector = introspector;
+        this.fetchSize = fetchSize;
+        this.filters = filters;
+    }
+
+    @Override
+    public Cursor compute() {
+        try {
+            if (collectionName.startsWith(SharePointIntrospector.EXCEL_PREFIX)) {
+                return computeExcel();
+            }
+            return computeList();
+        } catch (Exception e) {
+            log.error("SharePoint fetch failed for '{}': {}", collectionName, e.getMessage(), e);
+            throw new RuntimeException("SharePoint query failed: " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public double progress() { return progress; }
+
+    @Override
+    public void cancel() { this.cancelled = true; }
+
+    @Override
+    public void close() { /* no resources to release */ }
+
+    // ----- Lists --------------------------------------------------------
+
+    private Cursor computeList() {
+        String listId = introspector.resolveListId(client, siteId, collectionName);
+        if (listId == null) {
+            throw new RuntimeException("List not found: " + collectionName);
+        }
+
+        // Resolve field order: explicit request → fields from describe → all
+        List<String> fields = resolveFieldOrder();
+        this.resolvedFieldOrder = new ArrayList<>(fields);
+
+        String selectExpr = "fields($select=" + String.join(",", fields) + ")";
+        String filterExpr = buildODataFilter();
+        int top = (fetchSize > 0 && fetchSize <= 5000) ? fetchSize : 5000;
+
+        log.info("Fetching List '{}' (id={}) top={} select={} filter={}",
+                collectionName, listId, top, selectExpr, filterExpr);
+
+        ListItemCollectionResponse resp = client.sites().bySiteId(siteId)
+                .lists().byListId(listId).items().get(config -> {
+                    config.queryParameters.expand = new String[]{selectExpr};
+                    config.queryParameters.top = top;
+                    if (filterExpr != null) {
+                        config.queryParameters.filter = filterExpr;
+                    }
+                    // Required when filtering on non-indexed columns
+                    config.headers.add("Prefer", "HonorNonIndexedQueriesWarningMayFailRandomly");
+                });
+
+        records = new ArrayList<>();
+        if (resp != null && resp.getValue() != null) {
+            int idx = 0;
+            int total = resp.getValue().size();
+            for (ListItem item : resp.getValue()) {
+                if (cancelled) break;
+                FieldValueSet fv = item.getFields();
+                Map<String, Object> raw = fv != null && fv.getAdditionalData() != null
+                        ? fv.getAdditionalData() : Collections.emptyMap();
+                records.add(rowToRecord(raw, fields));
+                idx++;
+                progress = ((double) idx / Math.max(total, 1)) * 100.0;
+            }
+        }
+        metadata = buildMetadata(fields, true);
+        progress = 100.0;
+        log.info("List '{}' returned {} rows", collectionName, records.size());
+        return new SharePointCursor(records, metadata);
+    }
+
+    private List<String> resolveFieldOrder() {
+        if (requestedFields != null && !requestedFields.isEmpty()
+                && !(requestedFields.size() == 1 && "*".equals(requestedFields.get(0)))) {
+            return requestedFields;
+        }
+        // Wildcard: introspect to get all fields
+        return introspector.describeCollection(client, siteId, collectionName)
+                .stream().map(fm -> fm.getName()).collect(Collectors.toList());
+    }
+
+    // ----- Excel (v1.1) -------------------------------------------------
+    //
+    // Excel-in-SharePoint via Graph's Workbook API is on the v1.1 roadmap.
+    // The collection-name prefix is preserved so configurations don't
+    // change when support lands; for now, calls fail loudly.
+
+    private Cursor computeExcel() {
+        throw new RuntimeException("Excel-in-SharePoint is not implemented in v1. "
+                + "Configure SharePoint Lists via INCLUDE_LISTS, or wait for v1.1.");
+    }
+
+    /** No-op in v1; preserved to keep the factory API stable for v1.1. */
+    private Map<String, String> excelPathsBySlug;
+
+    void setExcelPathsBySlug(Map<String, String> m) {
+        this.excelPathsBySlug = m;
+    }
+
+    // ----- Filter pushdown ----------------------------------------------
+
+    private String buildODataFilter() {
+        if (filters == null || filters.isEmpty()) return null;
+        List<Filter> flat = flattenFilters(filters);
+        List<String> clauses = new ArrayList<>();
+        for (Filter f : flat) {
+            String clause = convertFilter(f);
+            if (clause != null) clauses.add(clause);
+        }
+        return clauses.isEmpty() ? null : String.join(" and ", clauses);
+    }
+
+    private List<Filter> flattenFilters(List<Filter> input) {
+        List<Filter> out = new ArrayList<>();
+        for (Filter f : input) {
+            if (f.getType() == FilterFunction.AND && f.getFilterAND() != null
+                    && f.getFilterAND().getFilters() != null) {
+                out.addAll(flattenFilters(f.getFilterAND().getFilters()));
+            } else {
+                out.add(f);
+            }
+        }
+        return out;
+    }
+
+    private String convertFilter(Filter f) {
+        if (f == null || f.getType() == null) return null;
+        switch (f.getType()) {
+            case EQ:
+                return f.getFilterEQ() != null
+                        ? path(f.getFilterEQ().getPath()) + " eq " + odataValue(f.getFilterEQ().getValue().getValue(), f.getFilterEQ().getType())
+                        : null;
+            case GT:
+                return f.getFilterGT() != null
+                        ? path(f.getFilterGT().getPath()) + " gt " + odataValue(f.getFilterGT().getValue().getValue(), f.getFilterGT().getType())
+                        : null;
+            case GE:
+                return f.getFilterGE() != null
+                        ? path(f.getFilterGE().getPath()) + " ge " + odataValue(f.getFilterGE().getValue().getValue(), f.getFilterGE().getType())
+                        : null;
+            case LT:
+                return f.getFilterLT() != null
+                        ? path(f.getFilterLT().getPath()) + " lt " + odataValue(f.getFilterLT().getValue().getValue(), f.getFilterLT().getType())
+                        : null;
+            case LE:
+                return f.getFilterLE() != null
+                        ? path(f.getFilterLE().getPath()) + " le " + odataValue(f.getFilterLE().getValue().getValue(), f.getFilterLE().getType())
+                        : null;
+            case CONTAINS:
+                return f.getFilterCONTAINS() != null
+                        ? "contains(" + path(f.getFilterCONTAINS().getPath()) + ","
+                            + odataValue(f.getFilterCONTAINS().getValue().getValue(), FieldType.STRING) + ")"
+                        : null;
+            case STARTS_WITH:
+                return f.getFilterSTARTS_WITH() != null
+                        ? "startswith(" + path(f.getFilterSTARTS_WITH().getPath()) + ","
+                            + odataValue(f.getFilterSTARTS_WITH().getValue().getValue(), FieldType.STRING) + ")"
+                        : null;
+            case ENDS_WITH:
+                return f.getFilterENDS_WITH() != null
+                        ? "endswith(" + path(f.getFilterENDS_WITH().getPath()) + ","
+                            + odataValue(f.getFilterENDS_WITH().getValue().getValue(), FieldType.STRING) + ")"
+                        : null;
+            case IS_NULL:
+                return f.getFilterISNULL() != null
+                        ? path(f.getFilterISNULL().getPath()) + " eq null"
+                        : null;
+            default:
+                log.debug("Unsupported filter for OData pushdown: {}", f.getType());
+                return null;
+        }
+    }
+
+    /** Items API requires fields/ prefix when filtering by list-item field. */
+    private String path(String column) {
+        return "fields/" + column;
+    }
+
+    private String odataValue(String value, FieldType type) {
+        if (value == null) return "null";
+        if (type == FieldType.INTEGER || type == FieldType.DOUBLE) {
+            return value;
+        }
+        return "'" + value.replace("'", "''") + "'";
+    }
+
+    // ----- Record building ----------------------------------------------
+
+    private Record rowToRecord(Map<String, Object> raw, List<String> fields) {
+        Record record = new Record();
+        List<Field> out = new ArrayList<>();
+        for (String f : fields) {
+            Object v = raw.get(f);
+            Field field = new Field();
+            if (v == null) {
+                field.setIsNull(true);
+                field.setValue("");
+            } else {
+                field.setValue(String.valueOf(v));
+            }
+            out.add(field);
+        }
+        record.setRecord(out);
+        return record;
+    }
+
+    private List<ResponseMetadata> buildMetadata(List<String> fields, boolean useDescribe) {
+        List<ResponseMetadata> out = new ArrayList<>();
+        Map<String, FieldType> declared = new HashMap<>();
+        if (useDescribe) {
+            try {
+                introspector.describeCollection(client, siteId, collectionName)
+                        .forEach(fm -> declared.put(fm.getName(), fm.getType()));
+            } catch (Exception e) {
+                log.debug("Type lookup for metadata failed; falling back to STRING: {}", e.getMessage());
+            }
+        }
+        for (String f : fields) {
+            ResponseMetadata rm = new ResponseMetadata();
+            rm.setName(f);
+            rm.setType(declared.getOrDefault(f, FieldType.STRING));
+            out.add(rm);
+        }
+        return out;
+    }
+
+    /** In-memory cursor over the fetched records. */
+    static class SharePointCursor implements Cursor {
+        private final List<Record> records;
+        private final List<ResponseMetadata> metadata;
+        private final Iterator<Record> iterator;
+
+        SharePointCursor(List<Record> records, List<ResponseMetadata> metadata) {
+            this.records = records;
+            this.metadata = metadata;
+            this.iterator = records.iterator();
+        }
+
+        @Override public List<ResponseMetadata> getMetadata() { return metadata; }
+        @Override public boolean hasNextBatch() { return false; }
+        @Override public boolean hasNext() { return iterator.hasNext(); }
+        @Override public Record next() {
+            if (!hasNext()) throw new NoSuchElementException();
+            return iterator.next();
+        }
+    }
+}
