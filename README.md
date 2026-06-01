@@ -97,12 +97,46 @@ metadata:
   labels:
     app: edc-sharepoint
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
   containers:
   - name: edc-sharepoint
     image: edc-sharepoint:latest
     imagePullPolicy: Never
     ports:
     - containerPort: 7339
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1Gi"
+    readinessProbe:
+      httpGet:
+        path: /actuator/health
+        port: 7339
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 2
+      failureThreshold: 3
+    livenessProbe:
+      httpGet:
+        path: /actuator/health
+        port: 7339
+      initialDelaySeconds: 30
+      periodSeconds: 15
+      timeoutSeconds: 3
+      failureThreshold: 3
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: false  # Jetty needs to write to /tmp/jetty-docbase.*
+      capabilities:
+        drop:
+        - ALL
 ---
 apiVersion: v1
 kind: Service

@@ -90,7 +90,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             return new ValidateSourceResponse(ok ? ok() : serverError("Failed to connect to SharePoint site"));
         } catch (Exception e) {
             log.error("pingSource failed: {}", e.getMessage());
-            return new ValidateSourceResponse(serverError(e.getMessage()));
+            return new ValidateSourceResponse(serverError(safeMessage(e)));
         }
     }
 
@@ -105,7 +105,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             return new ValidateCollectionResponse(found ? ok() : serverError("Collection not found: " + collectionName));
         } catch (Exception e) {
             log.error("pingCollection failed: {}", e.getMessage());
-            return new ValidateCollectionResponse(serverError(e.getMessage()));
+            return new ValidateCollectionResponse(serverError(safeMessage(e)));
         }
     }
 
@@ -144,7 +144,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             return new MetaCollectionsResponse(collections, ok());
         } catch (Exception e) {
             log.error("collections failed: {}", e.getMessage());
-            return new MetaCollectionsResponse(Collections.emptyList(), serverError(e.getMessage()));
+            return new MetaCollectionsResponse(Collections.emptyList(), serverError(safeMessage(e)));
         }
     }
 
@@ -157,7 +157,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             return new MetaDescribeResponse(fields, ok());
         } catch (Exception e) {
             log.error("describe failed: {}", e.getMessage());
-            return new MetaDescribeResponse(Collections.emptyList(), serverError(e.getMessage()));
+            return new MetaDescribeResponse(Collections.emptyList(), serverError(safeMessage(e)));
         }
     }
 
@@ -198,7 +198,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             return new MetaDescribeSchemaResponse(schemas, ok());
         } catch (Exception e) {
             log.error("describeSchemas failed: {}", e.getMessage());
-            return new MetaDescribeSchemaResponse(Collections.emptyList(), serverError(e.getMessage()));
+            return new MetaDescribeSchemaResponse(Collections.emptyList(), serverError(safeMessage(e)));
         }
     }
 
@@ -240,7 +240,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             return new SampleResponse(samples, ok());
         } catch (Exception e) {
             log.error("sample failed: {}", e.getMessage());
-            return new SampleResponse(Collections.emptyList(), serverError(e.getMessage()));
+            return new SampleResponse(Collections.emptyList(), serverError(safeMessage(e)));
         }
     }
 
@@ -273,8 +273,42 @@ public class SharePointDataProvider extends AbstractDataProvider {
             return new SharePointComputeTaskFactory(ctx.client, ctx.siteId, collectionName,
                     requestedFields, typesMapping, introspector, fetchSize, filters, ctx.excelPathsBySlug);
         } catch (Exception e) {
-            throw new ExecuteException("Failed to create compute task: " + e.getMessage());
+            throw new ExecuteException("Failed to create compute task: " + safeMessage(e));
         }
+    }
+
+    /**
+     * Build a message safe to return to Composer / surface in admin UI.
+     *
+     * Graph SDK exceptions can carry the request body, Authorization
+     * header fragments, the failing principal, or tenant identifiers in
+     * their message. Returning those verbatim to a Composer admin (and
+     * thereby into Composer's audit logs) leaks secrets and identity
+     * detail unnecessarily.
+     *
+     * Our own IllegalArgumentExceptions are intended for the operator and
+     * are passed through. Everything else is reduced to a category +
+     * status code where one is recoverable; full stack lands in the pod
+     * log only.
+     */
+    private String safeMessage(Throwable e) {
+        if (e == null) return "SharePoint connector error";
+        log.error("Connector error (full detail): {}", e.toString(), e);
+        if (e instanceof IllegalArgumentException) {
+            // Our own validation — message is operator-written, safe to surface.
+            return e.getMessage() != null ? e.getMessage() : "Invalid argument";
+        }
+        // Try to extract a Graph status code without echoing the raw message.
+        String className = e.getClass().getSimpleName();
+        String msg = e.getMessage();
+        if (msg != null) {
+            // Conservative pattern: surface a 3-digit status if present at the start.
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\b([45][0-9]{2})\\b").matcher(msg);
+            if (m.find()) {
+                return "SharePoint Graph error (HTTP " + m.group(1) + "); see pod logs for detail";
+            }
+        }
+        return "SharePoint connector internal error (" + className + "); see pod logs for detail";
     }
 
     @Override

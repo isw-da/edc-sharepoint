@@ -58,25 +58,22 @@ public class SharePointIntrospector {
                                                 Set<String> includeLists, List<String> includeExcel) {
         List<CollectionInfo> collections = new ArrayList<>();
 
-        // SharePoint Lists
+        // SharePoint Lists — follow @odata.nextLink across pages.
         try {
-            ListCollectionResponse lists = client.sites().bySiteId(siteId).lists().get();
-            if (lists != null && lists.getValue() != null) {
-                for (com.microsoft.graph.models.List list : lists.getValue()) {
-                    if (Boolean.TRUE.equals(list.getList() != null ? list.getList().getHidden() : null)) {
-                        continue;
-                    }
-                    String name = list.getDisplayName();
-                    if (name == null || name.isEmpty()) continue;
-                    if (includeLists != null && !includeLists.isEmpty() && !includeLists.contains(name)) {
-                        continue;
-                    }
-                    CollectionInfo ci = new CollectionInfo();
-                    ci.setCollection(name);
-                    ci.setSchema("default");
-                    collections.add(ci);
-                    log.debug("Discovered List: {} (id={})", name, list.getId());
+            for (com.microsoft.graph.models.List list : iterateAllLists(client, siteId)) {
+                if (Boolean.TRUE.equals(list.getList() != null ? list.getList().getHidden() : null)) {
+                    continue;
                 }
+                String name = list.getDisplayName();
+                if (name == null || name.isEmpty()) continue;
+                if (includeLists != null && !includeLists.isEmpty() && !includeLists.contains(name)) {
+                    continue;
+                }
+                CollectionInfo ci = new CollectionInfo();
+                ci.setCollection(name);
+                ci.setSchema("default");
+                collections.add(ci);
+                log.debug("Discovered List: {} (id={})", name, list.getId());
             }
         } catch (Exception e) {
             log.error("Failed to enumerate Lists at site {}: {}", siteId, e.getMessage());
@@ -171,17 +168,42 @@ public class SharePointIntrospector {
     }
 
     /**
-     * Resolve a List displayName to its GUID identifier.
+     * Resolve a List displayName to its GUID identifier. Walks all pages of
+     * the /lists response — tenants with many sites/lists routinely exceed
+     * the default ~200 item page and previous single-page lookups would
+     * silently fail for the (N>200)th list.
      */
     public String resolveListId(GraphServiceClient client, String siteId, String listName) {
-        ListCollectionResponse lists = client.sites().bySiteId(siteId).lists().get();
-        if (lists == null || lists.getValue() == null) return null;
-        for (com.microsoft.graph.models.List list : lists.getValue()) {
+        for (com.microsoft.graph.models.List list : iterateAllLists(client, siteId)) {
             if (listName.equals(list.getDisplayName())) {
                 return list.getId();
             }
         }
         return null;
+    }
+
+    /**
+     * Walk every page of /sites/{id}/lists, materialising all entries into a
+     * single list. Uses @odata.nextLink via withUrl(). Caller iterates the
+     * returned list normally.
+     */
+    private List<com.microsoft.graph.models.List> iterateAllLists(GraphServiceClient client, String siteId) {
+        List<com.microsoft.graph.models.List> all = new ArrayList<>();
+        ListCollectionResponse page = client.sites().bySiteId(siteId).lists().get();
+        int pageCount = 0;
+        while (page != null) {
+            pageCount++;
+            if (page.getValue() != null) all.addAll(page.getValue());
+            String nextLink = page.getOdataNextLink();
+            if (nextLink == null || nextLink.isEmpty()) break;
+            if (pageCount > 50) {
+                log.warn("List pagination exceeded 50 pages at site {} — capping to avoid runaway", siteId);
+                break;
+            }
+            page = client.sites().bySiteId(siteId).lists().withUrl(nextLink).get();
+        }
+        log.debug("Walked {} page(s) of lists at site {}, {} entries total", pageCount, siteId, all.size());
+        return all;
     }
 
     // ----- Excel support (v1.1) -----------------------------------------
