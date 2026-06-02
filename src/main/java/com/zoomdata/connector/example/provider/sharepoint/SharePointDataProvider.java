@@ -314,6 +314,11 @@ public class SharePointDataProvider extends AbstractDataProvider {
     @Override
     protected IDescriptionProvider createDescriptionProvider() {
         return new GenericDescriptionProvider(CONNECTION_TYPE)
+                // Connector icon shown in the Composer / SI connection-type
+                // picker. Original SharePoint-teal mark (not Microsoft's
+                // trademarked logo) at classpath root. Leading slash =
+                // resolve from classpath root regardless of caller package.
+                .svgIcon("/sharepoint-icon.svg")
                 .addParameters(
                         stringParameter(PARAM_TENANT_ID)
                                 .isRequired(true)

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SharePoint EDC connector icon.
+
+  ORIGINAL artwork by insightsoftware, not Microsoft's trademarked logo.
+  Uses the SharePoint brand teal so it reads correctly in the Composer /
+  Simba Intelligence connection-type picker. The motif is two interlocking
+  rings = "connected sites / share point", which also reflects what the
+  connector does. To use Microsoft's official SharePoint logo instead,
+  replace this file with the official SVG (downloadable under Microsoft's
+  brand guidelines) and keep the same filename; svgIcon() will pick it up.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48"
+     role="img" aria-label="SharePoint connector">
+  <defs>
+    <linearGradient id="spTeal" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#036C70"/>
+      <stop offset="1" stop-color="#21A0A6"/>
+    </linearGradient>
+  </defs>
+  <rect width="48" height="48" rx="9" fill="url(#spTeal)"/>
+  <g fill="none" stroke="#ffffff" stroke-width="2.6">
+    <circle cx="19.5" cy="20" r="7"/>
+    <circle cx="29.5" cy="28.5" r="5.5"/>
+  </g>
+  <circle cx="19.5" cy="20" r="2.4" fill="#ffffff"/>
+  <circle cx="29.5" cy="28.5" r="1.9" fill="#ffffff"/>
+</svg>

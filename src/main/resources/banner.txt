@@ -1,20 +1,9 @@
-${AnsiColor.GREEN}       x,
-${AnsiColor.GREEN}       Mk                    .:l:
-${AnsiColor.GREEN}      .MX             .:okKNMMMMMW:
-${AnsiColor.GREEN}     .dMM,     .;lx0NMMMMMMMM0dd;.
-${AnsiColor.GREEN}   :0;xMM0:oOXMMWOdc;dNMMMk;
-${AnsiColor.GREEN}   .okNMMMW0xc,.   cNMMWo.
-${AnsiColor.GREEN}      xMMMO      lNMMXc
-${AnsiColor.GREEN}      xMMM0    ,XMMN:
-${AnsiColor.GREEN}      cMMMO   lMMWl
-${AnsiColor.GREEN}        cKK  kMMK.
-${AnsiColor.GREEN}            kMMo   ...'',:cllllol;
-${AnsiColor.GREEN}          .XMK.     .,;coxkWN00OOOKl
-${AnsiColor.GREEN}         'WMWddk00Kkc;,.
-${AnsiColor.GREEN}        ;WMMMMWkl,.           _
-${AnsiColor.GREEN}       ;WMW0o.
-${AnsiColor.GREEN}      ,MMO.
-${AnsiColor.GREEN}     .X:
-${AnsiColor.GREEN}    .,
+${AnsiColor.CYAN}
+   ____  _                   ____       _       _
+  / ___|| |__   __ _ _ __ ___|  _ \ ___ (_)_ __ | |_
+  \___ \| '_ \ / _` | '__/ _ \ |_) / _ \| | '_ \| __|
+   ___) | | | | (_| | | |  __/  __/ (_) | | | | | |_
+  |____/|_| |_|\__,_|_|  \___|_|   \___/|_|_| |_|\__|
 ${AnsiColor.DEFAULT}
-Zoomdata Sample Connector Server :: v2
+SharePoint EDC Connector  ::  Logi Composer / Simba Intelligence
+Microsoft Graph  |  app-only auth  |  Lists + Excel
