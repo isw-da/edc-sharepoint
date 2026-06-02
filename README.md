@@ -26,6 +26,9 @@ production stack (edc-api 25.4.0, Thrift 0.21.0, Spring Boot 3.2.5, Java 17).
 |-----|---------|--------|
 | SharePoint Online Lists | Service principal | v1, primary target |
 | Excel-in-SharePoint (tables, sheets, named ranges) | Service principal | v1.1, validated E2E |
+| CSV / TSV / JSON files in a drive | Service principal | v1.1, validated E2E |
+| Parquet / Avro / ORC / XML files | n/a | v2 (need columnar/streaming libs or shape config) |
+| PDF / Word / PowerPoint / images | n/a | Out of scope — unstructured, not a tabular EDC |
 | SharePoint on-prem | n/a | Out of scope |
 
 ### Excel-in-SharePoint (v1.1)
@@ -45,6 +48,30 @@ values are read via the Graph Workbook API as raw 2D arrays (the typed SDK
 cannot represent them). No filter pushdown for Excel — the QE filters
 in-memory, so keep workbook files to a reasonable size (tens of thousands of
 rows). Dates may appear as Excel serial numbers depending on cell formatting.
+
+### CSV / TSV / JSON files (v1.1)
+
+Set `INCLUDE_FILES` to a comma-separated list of file paths in the site's
+default document library (e.g. `/data/agents.csv, /exports/savings.json`).
+Each file becomes one collection named `file__<file-slug>`, read via the
+Graph drive content API.
+
+| Type | Parsing |
+|---|---|
+| `.csv` / `.tsv` | First row = header (column names). Column type decided per column: all-integer → INTEGER, all-numeric → DOUBLE, else STRING. |
+| `.json` | Top-level array of objects, OR newline-delimited objects (NDJSON), OR a single object. Object keys → columns (union, first-seen order). Nested objects/arrays in a value are stringified to JSON. |
+
+Notes and limits:
+
+- **Leading-zero codes are preserved.** A CSV column like `00123, 00456`
+  stays STRING (not coerced to `123`), so agent codes / ZIPs / IDs aren't
+  silently mangled.
+- **No filter/aggregation pushdown** — the whole file is read and the QE
+  filters in-memory. Keep files to tens of thousands of rows.
+- **JSON is flat-only** in v1.1: nested structures become JSON strings in a
+  cell rather than being flattened into columns.
+- Unsupported extensions (e.g. `.parquet`, `.xml`) are skipped at discovery
+  with a warning.
 
 ## Quick start
 
@@ -206,6 +233,7 @@ In the SI UI: **Connections > Create > SharePoint**
 | SITE_URLS | One of | Comma-separated site URLs for a multi-site connection (v1.1). Takes precedence over SITE_URL. See "Multi-site" below. |
 | INCLUDE_LISTS | No | Comma-separated allowlist of List displayNames. Empty = all visible Lists. Applied to every configured site. |
 | INCLUDE_EXCEL | No | Comma-separated paths to .xlsx files in the site drive (e.g. `/sophos-test.xlsx`). Each file's tables, sheets, and named ranges become collections. See "Excel-in-SharePoint" above. |
+| INCLUDE_FILES | No | Comma-separated paths to CSV/TSV/JSON files in the site drive (e.g. `/data/agents.csv`). Each becomes a collection. See "CSV / TSV / JSON files" above. |
 | AUTHORITY | No | Override `https://login.microsoftonline.com` for sovereign clouds (US Gov, China). |
 
 One of `SITE_URL` or `SITE_URLS` is required.

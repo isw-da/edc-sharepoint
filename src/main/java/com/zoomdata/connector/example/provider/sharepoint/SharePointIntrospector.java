@@ -44,6 +44,11 @@ public class SharePointIntrospector {
     static final String PREFIX_SHEET = "excel_sheet__";
     static final String PREFIX_RANGE = "excel_range__";
 
+    // v1.1: file collections (CSV/TSV/JSON). One collection per file:
+    // file__<file-slug>. The file slug (fileSlugFromPath) collapses non-alnum
+    // runs to a single "_" so it never contains "__".
+    static final String PREFIX_FILE = "file__";
+
     enum ExcelSurface { TABLE, SHEET, RANGE }
 
     private final SharePointTypesMapping typesMapping;
@@ -63,8 +68,7 @@ public class SharePointIntrospector {
     }
 
     public List<CollectionInfo> getCollections(GraphServiceClient client, String siteId,
-                                                Set<String> includeLists, List<String> includeExcel,
-                                                SharePointWorkbookReader workbook) {
+                                                Set<String> includeLists, SharePointReaders readers) {
         List<CollectionInfo> collections = new ArrayList<>();
 
         // SharePoint Lists — follow @odata.nextLink across pages.
@@ -107,13 +111,25 @@ public class SharePointIntrospector {
             log.error("Failed to enumerate Lists at site {}: {}", siteId, e.getMessage());
         }
 
-        // Excel surfaces (only if INCLUDE_EXCEL configured + reader present)
-        if (includeExcel != null && !includeExcel.isEmpty() && workbook != null) {
-            for (String path : includeExcel) {
+        // Excel surfaces (only if INCLUDE_EXCEL configured)
+        if (readers != null && readers.workbook != null) {
+            for (String path : readers.workbook.configuredPaths()) {
                 try {
-                    collections.addAll(discoverExcelCollections(workbook, path));
+                    collections.addAll(discoverExcelCollections(readers.workbook, path));
                 } catch (Exception e) {
                     log.warn("Excel discovery failed for path '{}': {}", path, e.getMessage());
+                }
+            }
+        }
+
+        // File collections (CSV/TSV/JSON) — one collection per INCLUDE_FILES path.
+        if (readers != null && readers.files != null) {
+            for (String path : readers.files.configuredPaths()) {
+                try {
+                    CollectionInfo ci = discoverFileCollection(path);
+                    if (ci != null) collections.add(ci);
+                } catch (Exception e) {
+                    log.warn("File discovery failed for path '{}': {}", path, e.getMessage());
                 }
             }
         }
@@ -123,9 +139,12 @@ public class SharePointIntrospector {
 
     public List<FieldMetadata> describeCollection(GraphServiceClient client, String siteId,
                                                    String collectionName,
-                                                   SharePointWorkbookReader workbook) {
+                                                   SharePointReaders readers) {
         if (isExcelCollection(collectionName)) {
-            return describeExcelCollection(workbook, collectionName);
+            return describeExcelCollection(readers != null ? readers.workbook : null, collectionName);
+        }
+        if (isFileCollection(collectionName)) {
+            return describeFileCollection(readers != null ? readers.files : null, collectionName);
         }
         return describeList(client, siteId, collectionName);
     }
@@ -428,6 +447,94 @@ public class SharePointIntrospector {
         ExcelSurface surface;
         String fileSlug;
         String entity;
+    }
+
+    // ----- File collections (CSV/TSV/JSON, v1.1) ------------------------
+
+    private CollectionInfo discoverFileCollection(String path) {
+        if (!SharePointFileReader.isSupported(path)) {
+            log.warn("INCLUDE_FILES path '{}' is not a supported type (csv/tsv/json); skipping", path);
+            return null;
+        }
+        CollectionInfo ci = new CollectionInfo();
+        ci.setCollection(fileCollectionName(fileSlugFromPath(path)));
+        ci.setSchema("default");
+        log.debug("Discovered file collection for '{}'", path);
+        return ci;
+    }
+
+    private List<FieldMetadata> describeFileCollection(SharePointFileReader fr, String collectionName) {
+        if (fr == null) {
+            throw new RuntimeException("File collection '" + collectionName + "' requested but no file "
+                    + "reader is available (INCLUDE_FILES not configured on this connection?)");
+        }
+        String slug = parseFileCollection(collectionName);
+        if (slug == null) throw new RuntimeException("Invalid file collection name: " + collectionName);
+        String path = fr.pathForSlug(slug);
+        if (path == null) {
+            throw new RuntimeException("File for slug '" + slug
+                    + "' is not in this connection's INCLUDE_FILES list");
+        }
+        return schemaFromHeaderGrid(fr.readGrid(path));
+    }
+
+    static boolean isFileCollection(String name) {
+        return name != null && name.startsWith(PREFIX_FILE);
+    }
+
+    static String fileCollectionName(String fileSlug) {
+        return PREFIX_FILE + fileSlug;
+    }
+
+    /** Returns the file slug, or null if not a file collection name. */
+    static String parseFileCollection(String collectionName) {
+        return isFileCollection(collectionName)
+                ? collectionName.substring(PREFIX_FILE.length()) : null;
+    }
+
+    static String fileSlugFromPath(String path) {
+        return path.replaceAll("^/+", "").replaceAll("[^A-Za-z0-9]+", "_").toLowerCase();
+    }
+
+    // ----- Shared header-grid helpers (files + future) ------------------
+
+    /**
+     * Column names from a header-row grid (row 0 = header). Blank headers
+     * become column_N. Shared by file collections; Excel tables/sheets use
+     * the equivalent logic in excelColumnNames.
+     */
+    static List<String> headerRowNames(List<List<Object>> grid) {
+        List<String> names = new ArrayList<>();
+        if (grid == null || grid.isEmpty()) return names;
+        List<Object> header = grid.get(0);
+        for (int i = 0; i < header.size(); i++) {
+            Object h = header.get(i);
+            String nm = h != null ? String.valueOf(h).trim() : "";
+            names.add(nm.isEmpty() ? "column_" + (i + 1) : nm);
+        }
+        return names;
+    }
+
+    /** Data rows of a header-row grid (everything after row 0). */
+    static List<List<Object>> headerGridData(List<List<Object>> grid) {
+        if (grid == null || grid.size() <= 1) return Collections.emptyList();
+        return grid.subList(1, grid.size());
+    }
+
+    static List<FieldMetadata> schemaFromHeaderGrid(List<List<Object>> grid) {
+        List<String> names = headerRowNames(grid);
+        List<List<Object>> data = headerGridData(grid);
+        List<FieldMetadata> meta = new ArrayList<>();
+        for (int i = 0; i < names.size(); i++) {
+            FieldMetadata fm = new FieldMetadata();
+            fm.setName(names.get(i));
+            fm.setType(inferExcelType(data, i));
+            FieldParams p = new FieldParams();
+            p.setFieldName(names.get(i));
+            fm.setFieldParams(p);
+            meta.add(fm);
+        }
+        return meta;
     }
 
     /** Parse a comma-separated allowlist into a Set, returning empty for null/blank input. */

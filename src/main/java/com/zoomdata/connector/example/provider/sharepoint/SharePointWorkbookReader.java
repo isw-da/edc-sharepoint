@@ -66,6 +66,11 @@ public class SharePointWorkbookReader {
         return pathsBySlug.get(slug);
     }
 
+    /** Configured INCLUDE_EXCEL paths (drives discovery). */
+    public java.util.Collection<String> configuredPaths() {
+        return pathsBySlug.values();
+    }
+
     /** Reference to a resolved drive item (an xlsx file). */
     public static final class FileRef {
         final String driveId;

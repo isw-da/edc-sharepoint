@@ -76,6 +76,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
     private static final String PARAM_SITE_URLS = "SITE_URLS";  // v1.1 multi-site, comma-separated
     private static final String PARAM_INCLUDE_LISTS = "INCLUDE_LISTS";
     private static final String PARAM_INCLUDE_EXCEL = "INCLUDE_EXCEL";
+    private static final String PARAM_INCLUDE_FILES = "INCLUDE_FILES";  // v1.1 CSV/TSV/JSON
     private static final String PARAM_AUTHORITY = "AUTHORITY";
 
     private final SharePointTypesMapping typesMapping = new SharePointTypesMapping();
@@ -159,7 +160,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             ConnContext ctx = context(request.getRequestInfo());
             String collectionName = request.getCollectionInfo().getCollection();
             Resolved r = resolve(ctx, collectionName);
-            List<FieldMetadata> fields = introspector.describeCollection(ctx.client, r.siteId, r.entity, r.workbook);
+            List<FieldMetadata> fields = introspector.describeCollection(ctx.client, r.siteId, r.entity, r.readers);
             return new MetaDescribeResponse(fields, ok());
         } catch (Exception e) {
             log.error("describe failed: {}", e.getMessage());
@@ -186,7 +187,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
                 try {
                     Resolved r = resolve(ctx, ci.getCollection());
                     List<FieldMetadata> fields = introspector.describeCollection(
-                            ctx.client, r.siteId, r.entity, r.workbook);
+                            ctx.client, r.siteId, r.entity, r.readers);
                     CollectionInfo e2 = new CollectionInfo();
                     e2.setCollection(ci.getCollection());
                     e2.setSchema("default");
@@ -214,12 +215,12 @@ public class SharePointDataProvider extends AbstractDataProvider {
             ConnContext ctx = context(request.getRequestInfo());
             String collectionName = request.getCollectionInfo().getCollection();
             Resolved r = resolve(ctx, collectionName);
-            List<FieldMetadata> fieldMeta = introspector.describeCollection(ctx.client, r.siteId, r.entity, r.workbook);
+            List<FieldMetadata> fieldMeta = introspector.describeCollection(ctx.client, r.siteId, r.entity, r.readers);
             List<String> fieldNames = fieldMeta.stream().map(FieldMetadata::getName).collect(Collectors.toList());
 
             SharePointComputeTask task = new SharePointComputeTask(
                     ctx.client, r.siteId, r.entity, fieldNames,
-                    typesMapping, introspector, 10, null, r.workbook);
+                    typesMapping, introspector, 10, null, r.readers);
             SharePointComputeTask.SharePointCursor cursor =
                     (SharePointComputeTask.SharePointCursor) task.compute();
 
@@ -276,7 +277,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             }
 
             return new SharePointComputeTaskFactory(ctx.client, r.siteId, r.entity,
-                    requestedFields, typesMapping, introspector, fetchSize, filters, r.workbook);
+                    requestedFields, typesMapping, introspector, fetchSize, filters, r.readers);
         } catch (Exception e) {
             throw new ExecuteException("Failed to create compute task: " + safeMessage(e));
         }
@@ -349,6 +350,10 @@ public class SharePointDataProvider extends AbstractDataProvider {
                         stringParameter(PARAM_INCLUDE_LISTS)
                                 .description("Comma-separated allowlist of List displayNames. Empty = all visible Lists."))
                 .addParameters(
+                        stringParameter(PARAM_INCLUDE_FILES)
+                                .description("Comma-separated paths to CSV/TSV/JSON files in the site drive "
+                                        + "(e.g. /data/agents.csv, /exports/savings.json). Each becomes a collection."))
+                .addParameters(
                         stringParameter(PARAM_INCLUDE_EXCEL)
                                 .description("Comma-separated paths to .xlsx files in the site drive. Empty = no Excel."))
                 .addParameters(
@@ -404,6 +409,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
         String authority = param(info, PARAM_AUTHORITY, false);
         String includeLists = param(info, PARAM_INCLUDE_LISTS, false);
         String includeExcel = param(info, PARAM_INCLUDE_EXCEL, false);
+        String includeFiles = param(info, PARAM_INCLUDE_FILES, false);
 
         List<String> urls;
         if (siteUrls != null && !siteUrls.trim().isEmpty()) {
@@ -422,16 +428,21 @@ public class SharePointDataProvider extends AbstractDataProvider {
         ConnContext ctx = new ConnContext();
         ctx.client = client;
         ctx.includeLists = SharePointIntrospector.parseAllowlist(includeLists);
-        ctx.includeExcel = SharePointIntrospector.parsePaths(includeExcel);
-        ctx.excelPathsBySlug = new HashMap<>();
-        for (String p : ctx.includeExcel) {
-            ctx.excelPathsBySlug.put(SharePointIntrospector.excelSlugFromPath(p), p);
+
+        Map<String, String> excelPathsBySlug = new HashMap<>();
+        for (String p : SharePointIntrospector.parsePaths(includeExcel)) {
+            excelPathsBySlug.put(SharePointIntrospector.excelSlugFromPath(p), p);
+        }
+        Map<String, String> filePathsBySlug = new HashMap<>();
+        for (String p : SharePointIntrospector.parsePaths(includeFiles)) {
+            filePathsBySlug.put(SharePointIntrospector.fileSlugFromPath(p), p);
         }
 
-        // Mint a Workbook token once and share it across all per-site readers
-        // (same credentials, same MSAL cache). Only when Excel is configured.
-        String token = ctx.includeExcel.isEmpty() ? null
-                : graphFactory.bearerToken(tenantId, clientId, clientSecret, authority);
+        // Mint one token shared across all per-site readers (same creds, same
+        // MSAL cache). Only needed when Excel or files are configured.
+        boolean needToken = !excelPathsBySlug.isEmpty() || !filePathsBySlug.isEmpty();
+        String token = needToken
+                ? graphFactory.bearerToken(tenantId, clientId, clientSecret, authority) : null;
 
         ctx.sites = new ArrayList<>();
         Set<String> usedSlugs = new java.util.HashSet<>();
@@ -445,10 +456,11 @@ public class SharePointDataProvider extends AbstractDataProvider {
             int n = 2;
             while (!usedSlugs.add(unique)) unique = slug + "_" + (n++);
             s.siteSlug = unique;
-            if (token != null) {
-                s.workbook = new SharePointWorkbookReader(
-                        graphFactory.rawHttpClient(), token, s.siteId, ctx.excelPathsBySlug);
-            }
+            SharePointWorkbookReader wb = excelPathsBySlug.isEmpty() ? null
+                    : new SharePointWorkbookReader(graphFactory.rawHttpClient(), token, s.siteId, excelPathsBySlug);
+            SharePointFileReader fr = filePathsBySlug.isEmpty() ? null
+                    : new SharePointFileReader(graphFactory.rawHttpClient(), token, s.siteId, filePathsBySlug);
+            s.readers = new SharePointReaders(wb, fr);
             ctx.sites.add(s);
         }
         ctx.multiSite = ctx.sites.size() > 1;
@@ -464,7 +476,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
         List<CollectionInfo> out = new ArrayList<>();
         for (SiteCtx s : ctx.sites) {
             List<CollectionInfo> siteCols = introspector.getCollections(
-                    ctx.client, s.siteId, ctx.includeLists, ctx.includeExcel, s.workbook);
+                    ctx.client, s.siteId, ctx.includeLists, s.readers);
             for (CollectionInfo ci : siteCols) {
                 if (ctx.multiSite) {
                     CollectionInfo p = new CollectionInfo();
@@ -491,7 +503,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
         if (!ctx.multiSite) {
             SiteCtx s = ctx.sites.get(0);
             r.siteId = s.siteId;
-            r.workbook = s.workbook;
+            r.readers = s.readers;
             r.entity = collectionName;
             return r;
         }
@@ -505,7 +517,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
         for (SiteCtx s : ctx.sites) {
             if (s.siteSlug.equals(slug)) {
                 r.siteId = s.siteId;
-                r.workbook = s.workbook;
+                r.readers = s.readers;
                 r.entity = entity;
                 return r;
             }
@@ -528,8 +540,6 @@ public class SharePointDataProvider extends AbstractDataProvider {
     private static class ConnContext {
         GraphServiceClient client;
         Set<String> includeLists;
-        List<String> includeExcel;
-        Map<String, String> excelPathsBySlug;
         List<SiteCtx> sites;
         boolean multiSite;
     }
@@ -539,13 +549,13 @@ public class SharePointDataProvider extends AbstractDataProvider {
         String siteUrl;
         String siteSlug;
         String siteId;
-        SharePointWorkbookReader workbook; // null when no INCLUDE_EXCEL paths
+        SharePointReaders readers; // workbook + file readers; either may be null
     }
 
     /** Result of routing a collection name to its site + entity. */
     private static class Resolved {
         String siteId;
-        SharePointWorkbookReader workbook;
+        SharePointReaders readers;
         String entity;
     }
 }

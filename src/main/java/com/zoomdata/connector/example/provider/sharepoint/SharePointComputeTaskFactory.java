@@ -20,7 +20,7 @@ public class SharePointComputeTaskFactory implements IComputeTaskFactory {
     private final SharePointIntrospector introspector;
     private final int fetchSize;
     private final List<Filter> filters;
-    private final SharePointWorkbookReader workbook; // null for List-only connections
+    private final SharePointReaders readers; // workbook + file readers; either may be null
     private final String rawQuery;
 
     public SharePointComputeTaskFactory(GraphServiceClient client, String siteId,
@@ -28,7 +28,7 @@ public class SharePointComputeTaskFactory implements IComputeTaskFactory {
                                          SharePointTypesMapping typesMapping,
                                          SharePointIntrospector introspector,
                                          int fetchSize, List<Filter> filters,
-                                         SharePointWorkbookReader workbook) {
+                                         SharePointReaders readers) {
         this.client = client;
         this.siteId = siteId;
         this.collectionName = collectionName;
@@ -37,7 +37,7 @@ public class SharePointComputeTaskFactory implements IComputeTaskFactory {
         this.introspector = introspector;
         this.fetchSize = fetchSize;
         this.filters = filters;
-        this.workbook = workbook;
+        this.readers = readers;
 
         StringBuilder sb = new StringBuilder("SharePoint ").append(collectionName);
         if (filters != null && !filters.isEmpty()) sb.append(" filter(...)");
@@ -51,7 +51,7 @@ public class SharePointComputeTaskFactory implements IComputeTaskFactory {
     public IComputeTask create() {
         return new SharePointComputeTask(
                 client, siteId, collectionName, requestedFields,
-                typesMapping, introspector, fetchSize, filters, workbook);
+                typesMapping, introspector, fetchSize, filters, readers);
     }
 
     @Override public String getRawQuery() { return rawQuery; }

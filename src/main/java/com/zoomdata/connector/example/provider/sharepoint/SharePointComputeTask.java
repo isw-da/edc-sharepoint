@@ -46,7 +46,7 @@ public class SharePointComputeTask implements IComputeTask {
     private final SharePointIntrospector introspector;
     private final int fetchSize;
     private final List<Filter> filters;
-    private final SharePointWorkbookReader workbook; // null for List-only connections
+    private final SharePointReaders readers; // workbook + file readers; either may be null
 
     private volatile boolean cancelled = false;
     private volatile double progress = 0.0;
@@ -59,7 +59,7 @@ public class SharePointComputeTask implements IComputeTask {
                                   SharePointTypesMapping typesMapping,
                                   SharePointIntrospector introspector,
                                   int fetchSize, List<Filter> filters,
-                                  SharePointWorkbookReader workbook) {
+                                  SharePointReaders readers) {
         this.client = client;
         this.siteId = siteId;
         this.collectionName = collectionName;
@@ -68,7 +68,7 @@ public class SharePointComputeTask implements IComputeTask {
         this.introspector = introspector;
         this.fetchSize = fetchSize;
         this.filters = filters;
-        this.workbook = workbook;
+        this.readers = readers;
     }
 
     @Override
@@ -76,6 +76,9 @@ public class SharePointComputeTask implements IComputeTask {
         try {
             if (SharePointIntrospector.isExcelCollection(collectionName)) {
                 return computeExcel();
+            }
+            if (SharePointIntrospector.isFileCollection(collectionName)) {
+                return computeFile();
             }
             return computeList();
         } catch (Exception e) {
@@ -149,13 +152,14 @@ public class SharePointComputeTask implements IComputeTask {
             return requestedFields;
         }
         // Wildcard: introspect to get all fields
-        return introspector.describeCollection(client, siteId, collectionName, workbook)
+        return introspector.describeCollection(client, siteId, collectionName, readers)
                 .stream().map(fm -> fm.getName()).collect(Collectors.toList());
     }
 
     // ----- Excel (v1.1, via Workbook API) -------------------------------
 
     private Cursor computeExcel() {
+        SharePointWorkbookReader workbook = readers != null ? readers.workbook : null;
         if (workbook == null) {
             throw new RuntimeException("Excel collection '" + collectionName + "' requested but no "
                     + "workbook reader available (INCLUDE_EXCEL not configured on this connection?)");
@@ -173,14 +177,41 @@ public class SharePointComputeTask implements IComputeTask {
         List<List<Object>> grid = SharePointIntrospector.fetchExcelGrid(workbook, f, c);
         List<String> allColumns = SharePointIntrospector.excelColumnNames(grid, c);
         List<List<Object>> dataRows = SharePointIntrospector.excelDataRows(grid, c.surface);
+        return gridCursor(allColumns, dataRows, "Excel");
+    }
 
-        // Honour the QE's requested field subset/order; default to all columns.
+    // ----- Files (v1.1, CSV/TSV/JSON) -----------------------------------
+
+    private Cursor computeFile() {
+        SharePointFileReader fr = readers != null ? readers.files : null;
+        if (fr == null) {
+            throw new RuntimeException("File collection '" + collectionName + "' requested but no "
+                    + "file reader available (INCLUDE_FILES not configured on this connection?)");
+        }
+        String slug = SharePointIntrospector.parseFileCollection(collectionName);
+        if (slug == null) throw new RuntimeException("Invalid file collection name: " + collectionName);
+        String path = fr.pathForSlug(slug);
+        if (path == null) {
+            throw new RuntimeException("File for slug '" + slug
+                    + "' is not in this connection's INCLUDE_FILES list");
+        }
+        List<List<Object>> grid = fr.readGrid(path);
+        List<String> allColumns = SharePointIntrospector.headerRowNames(grid);
+        List<List<Object>> dataRows = SharePointIntrospector.headerGridData(grid);
+        return gridCursor(allColumns, dataRows, "File");
+    }
+
+    /**
+     * Shared row-building for grid-shaped sources (Excel + files): honour the
+     * QE's requested field subset/order, map to grid column indices, render
+     * cells as strings, and attach response metadata.
+     */
+    private Cursor gridCursor(List<String> allColumns, List<List<Object>> dataRows, String kind) {
         List<String> fields = (requestedFields != null && !requestedFields.isEmpty()
                 && !(requestedFields.size() == 1 && "*".equals(requestedFields.get(0))))
                 ? requestedFields : allColumns;
         this.resolvedFieldOrder = new ArrayList<>(fields);
 
-        // Map each requested field name to its column index in the grid.
         int[] colIndex = new int[fields.size()];
         for (int i = 0; i < fields.size(); i++) {
             colIndex[i] = allColumns.indexOf(fields.get(i));
@@ -210,7 +241,7 @@ public class SharePointComputeTask implements IComputeTask {
         }
         metadata = buildMetadata(fields, true);
         progress = 100.0;
-        log.info("Excel '{}' returned {} row(s) ({} column(s))", collectionName, records.size(), fields.size());
+        log.info("{} '{}' returned {} row(s) ({} column(s))", kind, collectionName, records.size(), fields.size());
         return new SharePointCursor(records, metadata);
     }
 
@@ -326,7 +357,7 @@ public class SharePointComputeTask implements IComputeTask {
         Map<String, FieldType> declared = new HashMap<>();
         if (useDescribe) {
             try {
-                introspector.describeCollection(client, siteId, collectionName, workbook)
+                introspector.describeCollection(client, siteId, collectionName, readers)
                         .forEach(fm -> declared.put(fm.getName(), fm.getType()));
             } catch (Exception e) {
                 log.debug("Type lookup for metadata failed; falling back to STRING: {}", e.getMessage());
