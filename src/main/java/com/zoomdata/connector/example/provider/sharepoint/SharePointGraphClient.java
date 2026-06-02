@@ -27,6 +27,7 @@
  */
 package com.zoomdata.connector.example.provider.sharepoint;
 
+import com.azure.core.credential.TokenRequestContext;
 import com.azure.identity.ClientSecretCredential;
 import com.azure.identity.ClientSecretCredentialBuilder;
 import com.microsoft.graph.core.authentication.AzureIdentityAccessTokenProvider;
@@ -63,9 +64,20 @@ public class SharePointGraphClient {
 
     private final ConcurrentMap<String, GraphServiceClient> cache = new ConcurrentHashMap<>();
 
+    // Credentials cached separately, keyed identically, so the raw-REST
+    // Workbook path (bearerToken) reuses the SAME ClientSecretCredential —
+    // and therefore the same MSAL token cache — as the typed SDK path. A
+    // separate credential would mean a second OAuth round-trip per connection.
+    private final ConcurrentMap<String, ClientSecretCredential> credentialCache = new ConcurrentHashMap<>();
+
     // Resolved once at instance construction from framework.properties.
     private final long connectTimeoutSec;
     private final long readTimeoutSec;
+
+    // Shared OkHttp client for raw Workbook REST calls (the Kiota typed layer
+    // can't read 2D workbook value arrays — see SharePointWorkbookReader).
+    // Plain client with our configured timeouts; bearer header added per call.
+    private final OkHttpClient rawHttpClient;
 
     public SharePointGraphClient() {
         Properties props = loadFrameworkProperties();
@@ -73,6 +85,7 @@ public class SharePointGraphClient {
                 DEFAULT_CONNECT_TIMEOUT_SEC);
         this.readTimeoutSec = parseLong(props.getProperty("sharepoint.read.timeout.sec"),
                 DEFAULT_READ_TIMEOUT_SEC);
+        this.rawHttpClient = buildRawHttpClient(connectTimeoutSec, readTimeoutSec);
         log.info("SharePoint Graph client configured: connectTimeout={}s, readTimeout={}s",
                 connectTimeoutSec, readTimeoutSec);
     }
@@ -84,6 +97,46 @@ public class SharePointGraphClient {
     SharePointGraphClient(long connectTimeoutSec, long readTimeoutSec) {
         this.connectTimeoutSec = connectTimeoutSec;
         this.readTimeoutSec = readTimeoutSec;
+        this.rawHttpClient = buildRawHttpClient(connectTimeoutSec, readTimeoutSec);
+    }
+
+    private static OkHttpClient buildRawHttpClient(long connectSec, long readSec) {
+        return new OkHttpClient.Builder()
+                .connectTimeout(Duration.ofSeconds(connectSec))
+                .readTimeout(Duration.ofSeconds(readSec))
+                .writeTimeout(Duration.ofSeconds(readSec))
+                .build();
+    }
+
+    /** Shared OkHttp client for raw Graph REST (Workbook reads). */
+    public OkHttpClient rawHttpClient() {
+        return rawHttpClient;
+    }
+
+    /**
+     * Acquire a Graph bearer token for the given credentials, reusing the
+     * cached ClientSecretCredential (and its MSAL token cache). Synchronous —
+     * azure-identity caches and refreshes the token internally, so repeated
+     * calls within a token's lifetime do not hit the network.
+     */
+    public String bearerToken(String tenantId, String clientId, String clientSecret, String authority) {
+        if (tenantId == null || tenantId.isEmpty()) throw new IllegalArgumentException("TENANT_ID is required");
+        if (clientId == null || clientId.isEmpty()) throw new IllegalArgumentException("CLIENT_ID is required");
+        if (clientSecret == null || clientSecret.isEmpty()) throw new IllegalArgumentException("CLIENT_SECRET is required");
+        String authorityHost = (authority != null && !authority.isEmpty()) ? authority : DEFAULT_AUTHORITY;
+        ClientSecretCredential cred = credential(tenantId, clientId, clientSecret, authorityHost);
+        return cred.getTokenSync(new TokenRequestContext().addScopes(GRAPH_SCOPE)).getToken();
+    }
+
+    /** Get-or-build a ClientSecretCredential, cached by the same key as the SDK client. */
+    private ClientSecretCredential credential(String tenantId, String clientId, String clientSecret, String authorityHost) {
+        String key = cacheKey(tenantId, clientId, clientSecret, authorityHost);
+        return credentialCache.computeIfAbsent(key, k -> new ClientSecretCredentialBuilder()
+                .clientId(clientId)
+                .tenantId(tenantId)
+                .clientSecret(clientSecret)
+                .authorityHost(authorityHost)
+                .build());
     }
 
     private Properties loadFrameworkProperties() {
@@ -134,12 +187,7 @@ public class SharePointGraphClient {
                 log.info("Building new GraphServiceClient (tenant={}, clientId={}, cache size now {})",
                         tenantId, clientId, size + 1);
             }
-            ClientSecretCredential credential = new ClientSecretCredentialBuilder()
-                    .clientId(clientId)
-                    .tenantId(tenantId)
-                    .clientSecret(clientSecret)
-                    .authorityHost(authorityHost)
-                    .build();
+            ClientSecretCredential credential = credential(tenantId, clientId, clientSecret, authorityHost);
 
             // v1.1: build the OkHttp client ourselves so we can apply our
             // configured timeouts. KiotaClientFactory.create() returns a

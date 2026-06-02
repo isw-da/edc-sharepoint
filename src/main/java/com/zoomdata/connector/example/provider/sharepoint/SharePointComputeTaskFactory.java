@@ -9,7 +9,6 @@ import com.zoomdata.connector.example.framework.async.IComputeTaskFactory;
 import com.zoomdata.gen.edc.filter.Filter;
 
 import java.util.List;
-import java.util.Map;
 
 public class SharePointComputeTaskFactory implements IComputeTaskFactory {
 
@@ -21,7 +20,7 @@ public class SharePointComputeTaskFactory implements IComputeTaskFactory {
     private final SharePointIntrospector introspector;
     private final int fetchSize;
     private final List<Filter> filters;
-    private final Map<String, String> excelPathsBySlug;
+    private final SharePointWorkbookReader workbook; // null for List-only connections
     private final String rawQuery;
 
     public SharePointComputeTaskFactory(GraphServiceClient client, String siteId,
@@ -29,7 +28,7 @@ public class SharePointComputeTaskFactory implements IComputeTaskFactory {
                                          SharePointTypesMapping typesMapping,
                                          SharePointIntrospector introspector,
                                          int fetchSize, List<Filter> filters,
-                                         Map<String, String> excelPathsBySlug) {
+                                         SharePointWorkbookReader workbook) {
         this.client = client;
         this.siteId = siteId;
         this.collectionName = collectionName;
@@ -38,7 +37,7 @@ public class SharePointComputeTaskFactory implements IComputeTaskFactory {
         this.introspector = introspector;
         this.fetchSize = fetchSize;
         this.filters = filters;
-        this.excelPathsBySlug = excelPathsBySlug;
+        this.workbook = workbook;
 
         StringBuilder sb = new StringBuilder("SharePoint ").append(collectionName);
         if (filters != null && !filters.isEmpty()) sb.append(" filter(...)");
@@ -50,13 +49,9 @@ public class SharePointComputeTaskFactory implements IComputeTaskFactory {
 
     @Override
     public IComputeTask create() {
-        SharePointComputeTask task = new SharePointComputeTask(
+        return new SharePointComputeTask(
                 client, siteId, collectionName, requestedFields,
-                typesMapping, introspector, fetchSize, filters);
-        if (excelPathsBySlug != null && !excelPathsBySlug.isEmpty()) {
-            task.setExcelPathsBySlug(excelPathsBySlug);
-        }
-        return task;
+                typesMapping, introspector, fetchSize, filters, workbook);
     }
 
     @Override public String getRawQuery() { return rawQuery; }

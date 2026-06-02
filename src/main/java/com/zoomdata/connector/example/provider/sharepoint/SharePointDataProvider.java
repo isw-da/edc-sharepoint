@@ -100,7 +100,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             ConnContext ctx = context(request.getRequestInfo());
             String collectionName = request.getCollectionInfo().getCollection();
             List<CollectionInfo> collections = introspector.getCollections(
-                    ctx.client, ctx.siteId, ctx.includeLists, ctx.includeExcel);
+                    ctx.client, ctx.siteId, ctx.includeLists, ctx.includeExcel, ctx.workbook);
             boolean found = collections.stream().anyMatch(c -> c.getCollection().equals(collectionName));
             return new ValidateCollectionResponse(found ? ok() : serverError("Collection not found: " + collectionName));
         } catch (Exception e) {
@@ -140,7 +140,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
         try {
             ConnContext ctx = context(request.getRequestInfo());
             List<CollectionInfo> collections = introspector.getCollections(
-                    ctx.client, ctx.siteId, ctx.includeLists, ctx.includeExcel);
+                    ctx.client, ctx.siteId, ctx.includeLists, ctx.includeExcel, ctx.workbook);
             return new MetaCollectionsResponse(collections, ok());
         } catch (Exception e) {
             log.error("collections failed: {}", e.getMessage());
@@ -153,7 +153,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
         try {
             ConnContext ctx = context(request.getRequestInfo());
             String collectionName = request.getCollectionInfo().getCollection();
-            List<FieldMetadata> fields = introspector.describeCollection(ctx.client, ctx.siteId, collectionName);
+            List<FieldMetadata> fields = introspector.describeCollection(ctx.client, ctx.siteId, collectionName, ctx.workbook);
             return new MetaDescribeResponse(fields, ok());
         } catch (Exception e) {
             log.error("describe failed: {}", e.getMessage());
@@ -166,7 +166,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
         try {
             ConnContext ctx = context(request.getRequestInfo());
             List<CollectionInfo> all = introspector.getCollections(ctx.client, ctx.siteId,
-                    ctx.includeLists, ctx.includeExcel);
+                    ctx.includeLists, ctx.includeExcel, ctx.workbook);
 
             List<CollectionInfo> requested = request.getCollections();
             if (requested != null && !requested.isEmpty()) {
@@ -180,7 +180,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             for (CollectionInfo ci : all) {
                 try {
                     List<FieldMetadata> fields = introspector.describeCollection(
-                            ctx.client, ctx.siteId, ci.getCollection());
+                            ctx.client, ctx.siteId, ci.getCollection(), ctx.workbook);
                     CollectionInfo e2 = new CollectionInfo();
                     e2.setCollection(ci.getCollection());
                     e2.setSchema("default");
@@ -207,15 +207,12 @@ public class SharePointDataProvider extends AbstractDataProvider {
         try {
             ConnContext ctx = context(request.getRequestInfo());
             String collectionName = request.getCollectionInfo().getCollection();
-            List<FieldMetadata> fieldMeta = introspector.describeCollection(ctx.client, ctx.siteId, collectionName);
+            List<FieldMetadata> fieldMeta = introspector.describeCollection(ctx.client, ctx.siteId, collectionName, ctx.workbook);
             List<String> fieldNames = fieldMeta.stream().map(FieldMetadata::getName).collect(Collectors.toList());
 
             SharePointComputeTask task = new SharePointComputeTask(
                     ctx.client, ctx.siteId, collectionName, fieldNames,
-                    typesMapping, introspector, 10, null);
-            if (ctx.excelPathsBySlug != null && !ctx.excelPathsBySlug.isEmpty()) {
-                task.setExcelPathsBySlug(ctx.excelPathsBySlug);
-            }
+                    typesMapping, introspector, 10, null, ctx.workbook);
             SharePointComputeTask.SharePointCursor cursor =
                     (SharePointComputeTask.SharePointCursor) task.compute();
 
@@ -271,7 +268,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             }
 
             return new SharePointComputeTaskFactory(ctx.client, ctx.siteId, collectionName,
-                    requestedFields, typesMapping, introspector, fetchSize, filters, ctx.excelPathsBySlug);
+                    requestedFields, typesMapping, introspector, fetchSize, filters, ctx.workbook);
         } catch (Exception e) {
             throw new ExecuteException("Failed to create compute task: " + safeMessage(e));
         }
@@ -400,6 +397,14 @@ public class SharePointDataProvider extends AbstractDataProvider {
         for (String p : ctx.includeExcel) {
             ctx.excelPathsBySlug.put(SharePointIntrospector.excelSlugFromPath(p), p);
         }
+        // Build the Workbook reader only when Excel paths are configured —
+        // List-only connections never mint a Workbook token. The reader
+        // shares the cached credential + OkHttp client from graphFactory.
+        if (!ctx.includeExcel.isEmpty()) {
+            String token = graphFactory.bearerToken(tenantId, clientId, clientSecret, authority);
+            ctx.workbook = new SharePointWorkbookReader(
+                    graphFactory.rawHttpClient(), token, siteId, ctx.excelPathsBySlug);
+        }
         return ctx;
     }
 
@@ -421,5 +426,6 @@ public class SharePointDataProvider extends AbstractDataProvider {
         Set<String> includeLists;
         List<String> includeExcel;
         Map<String, String> excelPathsBySlug;
+        SharePointWorkbookReader workbook; // null when no INCLUDE_EXCEL paths
     }
 }

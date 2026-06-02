@@ -73,7 +73,7 @@ public class SharePointSmokeTest {
         System.out.println("--- 3. Enumerate collections (Lists) ---");
         List<CollectionInfo> collections;
         try {
-            collections = intro.getCollections(client, siteId, Collections.emptySet(), Collections.emptyList());
+            collections = intro.getCollections(client, siteId, Collections.emptySet(), Collections.emptyList(), null);
             System.out.println("found " + collections.size() + " collection(s):");
             for (CollectionInfo c : collections) {
                 System.out.println("  - " + c.getCollection() + "  (schema=" + c.getSchema() + ")");
@@ -95,7 +95,7 @@ public class SharePointSmokeTest {
         for (CollectionInfo c : collections) {
             System.out.println("Describing: " + c.getCollection());
             try {
-                List<FieldMetadata> fields = intro.describeCollection(client, siteId, c.getCollection());
+                List<FieldMetadata> fields = intro.describeCollection(client, siteId, c.getCollection(), null);
                 System.out.println("  " + fields.size() + " column(s):");
                 for (FieldMetadata fm : fields) {
                     String label = fm.getFieldParams() != null ? fm.getFieldParams().getFieldLabel() : null;
@@ -111,13 +111,13 @@ public class SharePointSmokeTest {
         System.out.println("--- 5. Data fetch via ComputeTask (first collection with no filters) ---");
         CollectionInfo first = collections.get(0);
         try {
-            List<FieldMetadata> meta = intro.describeCollection(client, siteId, first.getCollection());
+            List<FieldMetadata> meta = intro.describeCollection(client, siteId, first.getCollection(), null);
             List<String> fields = meta.stream().map(FieldMetadata::getName).collect(Collectors.toList());
             System.out.println("Fetching: " + first.getCollection() + " (" + fields.size() + " fields)");
 
             SharePointComputeTask task = new SharePointComputeTask(
                     client, siteId, first.getCollection(), fields,
-                    types, intro, 100, null);
+                    types, intro, 100, null, null);
             Cursor cursor = task.compute();
 
             List<ResponseMetadata> respMeta = cursor.getMetadata();

@@ -15,13 +15,13 @@ package com.zoomdata.connector.example.provider.sharepoint;
 
 import com.microsoft.graph.models.ColumnDefinition;
 import com.microsoft.graph.models.ColumnDefinitionCollectionResponse;
-import com.microsoft.graph.models.DriveItem;
 import com.microsoft.graph.models.ListCollectionResponse;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
 import com.zoomdata.connector.example.framework.common.Meta;
 import com.zoomdata.gen.edc.request.CollectionInfo;
 import com.zoomdata.gen.edc.types.FieldMetadata;
 import com.zoomdata.gen.edc.types.FieldParams;
+import com.zoomdata.gen.edc.types.FieldType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,7 +36,15 @@ public class SharePointIntrospector {
 
     private static final Logger log = LoggerFactory.getLogger(SharePointIntrospector.class);
 
-    static final String EXCEL_PREFIX = "excel__";
+    // v1.1: three Excel surfaces, each its own collection-name prefix.
+    // Format: <prefix><file-slug>__<entity>, where <file-slug> never
+    // contains "__" (excelSlugFromPath collapses non-alnum runs to one "_"),
+    // so the entity (real table/sheet/range name) may itself contain "__".
+    static final String PREFIX_TABLE = "excel_table__";
+    static final String PREFIX_SHEET = "excel_sheet__";
+    static final String PREFIX_RANGE = "excel_range__";
+
+    enum ExcelSurface { TABLE, SHEET, RANGE }
 
     private final SharePointTypesMapping typesMapping;
 
@@ -55,7 +63,8 @@ public class SharePointIntrospector {
     }
 
     public List<CollectionInfo> getCollections(GraphServiceClient client, String siteId,
-                                                Set<String> includeLists, List<String> includeExcel) {
+                                                Set<String> includeLists, List<String> includeExcel,
+                                                SharePointWorkbookReader workbook) {
         List<CollectionInfo> collections = new ArrayList<>();
 
         // SharePoint Lists — follow @odata.nextLink across pages.
@@ -98,11 +107,11 @@ public class SharePointIntrospector {
             log.error("Failed to enumerate Lists at site {}: {}", siteId, e.getMessage());
         }
 
-        // Excel tables (only if INCLUDE_EXCEL configured)
-        if (includeExcel != null && !includeExcel.isEmpty()) {
+        // Excel surfaces (only if INCLUDE_EXCEL configured + reader present)
+        if (includeExcel != null && !includeExcel.isEmpty() && workbook != null) {
             for (String path : includeExcel) {
                 try {
-                    collections.addAll(discoverExcelTables(client, siteId, path));
+                    collections.addAll(discoverExcelCollections(workbook, path));
                 } catch (Exception e) {
                     log.warn("Excel discovery failed for path '{}': {}", path, e.getMessage());
                 }
@@ -113,9 +122,10 @@ public class SharePointIntrospector {
     }
 
     public List<FieldMetadata> describeCollection(GraphServiceClient client, String siteId,
-                                                   String collectionName) {
-        if (collectionName.startsWith(EXCEL_PREFIX)) {
-            return describeExcelTable(client, siteId, collectionName);
+                                                   String collectionName,
+                                                   SharePointWorkbookReader workbook) {
+        if (isExcelCollection(collectionName)) {
+            return describeExcelCollection(workbook, collectionName);
         }
         return describeList(client, siteId, collectionName);
     }
@@ -250,29 +260,163 @@ public class SharePointIntrospector {
         return all;
     }
 
-    // ----- Excel support (v1.1) -----------------------------------------
+    // ----- Excel support (v1.1, via Workbook API / SharePointWorkbookReader) -----
     //
-    // v1 stub. Excel-in-SharePoint via Graph's Workbook API is on the
-    // roadmap; the connection parameter INCLUDE_EXCEL is accepted now so
-    // that configurations don't need to change later. Discovery returns
-    // nothing; the ComputeTask will refuse Excel collections with a clear
-    // error.
+    // Each xlsx in INCLUDE_EXCEL contributes up to three kinds of collection:
+    //   excel_table__<slug>__<tableName>   — every Excel table (header row)
+    //   excel_sheet__<slug>__<sheetName>   — every visible sheet's used-range
+    //   excel_range__<slug>__<rangeName>   — every visible named Range
+    // Cell values come back as a 2D array via the raw reader; we never touch
+    // the Kiota Json type (which cannot represent the array).
 
-    private List<CollectionInfo> discoverExcelTables(GraphServiceClient client, String siteId, String path) {
-        log.warn("Excel discovery requested for '{}' but Excel support is not implemented in v1. "
-                + "Skipping; use SharePoint Lists in v1.", path);
-        return Collections.emptyList();
+    private List<CollectionInfo> discoverExcelCollections(SharePointWorkbookReader wb, String path) {
+        List<CollectionInfo> out = new ArrayList<>();
+        SharePointWorkbookReader.FileRef f = wb.resolveFile(path);
+        if (f == null) return out; // resolveFile already logged why
+        String slug = excelSlugFromPath(path);
+        for (String t : wb.listTables(f)) out.add(excelCi(ExcelSurface.TABLE, slug, t));
+        for (String s : wb.listWorksheets(f)) out.add(excelCi(ExcelSurface.SHEET, slug, s));
+        for (String r : wb.listNamedRanges(f)) out.add(excelCi(ExcelSurface.RANGE, slug, r));
+        log.info("Excel '{}': discovered {} collection(s)", path, out.size());
+        return out;
     }
 
-    private List<FieldMetadata> describeExcelTable(GraphServiceClient client, String siteId,
-                                                    String collectionName) {
-        throw new RuntimeException("Excel-in-SharePoint is not implemented in v1. "
-                + "Use SharePoint Lists, or wait for the v1.1 Workbook API integration.");
+    private CollectionInfo excelCi(ExcelSurface surface, String slug, String entity) {
+        CollectionInfo ci = new CollectionInfo();
+        ci.setCollection(excelCollectionName(surface, slug, entity));
+        ci.setSchema("default");
+        return ci;
     }
 
-    public DriveItem resolveDriveItemByPath(GraphServiceClient client, String siteId, String path) {
-        log.warn("Drive path resolution is not implemented in v1 (path={})", path);
-        return null;
+    private List<FieldMetadata> describeExcelCollection(SharePointWorkbookReader wb, String collectionName) {
+        if (wb == null) {
+            throw new RuntimeException("Excel collection '" + collectionName + "' requested but no "
+                    + "workbook reader is available (INCLUDE_EXCEL not configured on this connection?)");
+        }
+        ExcelColl c = parseExcelCollection(collectionName);
+        if (c == null) throw new RuntimeException("Invalid Excel collection name: " + collectionName);
+        String path = wb.pathForSlug(c.fileSlug);
+        if (path == null) {
+            throw new RuntimeException("Excel file for slug '" + c.fileSlug
+                    + "' is not in this connection's INCLUDE_EXCEL list");
+        }
+        SharePointWorkbookReader.FileRef f = wb.resolveFile(path);
+        if (f == null) throw new RuntimeException("Excel file not found: " + path);
+        List<List<Object>> grid = fetchExcelGrid(wb, f, c);
+        List<String> names = excelColumnNames(grid, c);
+        List<List<Object>> data = excelDataRows(grid, c.surface);
+        List<FieldMetadata> meta = new ArrayList<>();
+        for (int i = 0; i < names.size(); i++) {
+            FieldMetadata fm = new FieldMetadata();
+            fm.setName(names.get(i));
+            fm.setType(inferExcelType(data, i));
+            FieldParams params = new FieldParams();
+            params.setFieldName(names.get(i));
+            fm.setFieldParams(params);
+            meta.add(fm);
+        }
+        return meta;
+    }
+
+    /** Fetch the 2D grid for an Excel collection (used by describe + ComputeTask). */
+    static List<List<Object>> fetchExcelGrid(SharePointWorkbookReader wb,
+                                             SharePointWorkbookReader.FileRef f, ExcelColl c) {
+        switch (c.surface) {
+            case TABLE: return wb.getTableRange(f, c.entity);
+            case SHEET: return wb.getUsedRange(f, c.entity);
+            case RANGE: return wb.getNamedRange(f, c.entity);
+            default: return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Column names for an Excel collection.
+     *  TABLE / SHEET: first grid row is the header.
+     *  RANGE: no header — single column takes the range name, multi-column
+     *         takes rangeName_1..rangeName_N.
+     */
+    static List<String> excelColumnNames(List<List<Object>> grid, ExcelColl c) {
+        List<String> names = new ArrayList<>();
+        if (grid == null || grid.isEmpty()) return names;
+        if (c.surface == ExcelSurface.RANGE) {
+            int width = 0;
+            for (List<Object> row : grid) width = Math.max(width, row.size());
+            if (width == 1) {
+                names.add(c.entity);
+            } else {
+                for (int i = 1; i <= width; i++) names.add(c.entity + "_" + i);
+            }
+            return names;
+        }
+        // TABLE / SHEET: header row.
+        List<Object> header = grid.get(0);
+        int i = 0;
+        for (Object h : header) {
+            i++;
+            String name = h != null ? String.valueOf(h).trim() : "";
+            names.add(name.isEmpty() ? "column_" + i : name);
+        }
+        return names;
+    }
+
+    /** Data rows (header dropped for TABLE/SHEET; all rows for RANGE). */
+    static List<List<Object>> excelDataRows(List<List<Object>> grid, ExcelSurface surface) {
+        if (grid == null || grid.isEmpty()) return Collections.emptyList();
+        if (surface == ExcelSurface.RANGE) return grid;
+        return grid.subList(1, grid.size());
+    }
+
+    /**
+     * Infer a Thrift FieldType for one Excel column by sampling its data
+     * cells. Numbers stay numeric (INTEGER if all integral, else DOUBLE);
+     * anything mixed or non-numeric falls back to STRING.
+     */
+    static FieldType inferExcelType(List<List<Object>> dataRows, int colIdx) {
+        boolean any = false, allIntegral = true, numeric = true;
+        for (List<Object> row : dataRows) {
+            if (colIdx >= row.size()) continue;
+            Object v = row.get(colIdx);
+            if (v == null) continue;
+            any = true;
+            if (v instanceof Long || v instanceof Integer) {
+                // integral
+            } else if (v instanceof Double || v instanceof Float) {
+                allIntegral = false;
+            } else {
+                numeric = false;
+                break;
+            }
+        }
+        if (!any || !numeric) return FieldType.STRING;
+        return allIntegral ? FieldType.INTEGER : FieldType.DOUBLE;
+    }
+
+    static boolean isExcelCollection(String name) {
+        return name != null && (name.startsWith(PREFIX_TABLE)
+                || name.startsWith(PREFIX_SHEET) || name.startsWith(PREFIX_RANGE));
+    }
+
+    static String excelCollectionName(ExcelSurface surface, String fileSlug, String entity) {
+        String prefix = surface == ExcelSurface.TABLE ? PREFIX_TABLE
+                : surface == ExcelSurface.SHEET ? PREFIX_SHEET : PREFIX_RANGE;
+        return prefix + fileSlug + "__" + entity;
+    }
+
+    static ExcelColl parseExcelCollection(String collectionName) {
+        ExcelSurface surface;
+        String prefix;
+        if (collectionName.startsWith(PREFIX_TABLE)) { surface = ExcelSurface.TABLE; prefix = PREFIX_TABLE; }
+        else if (collectionName.startsWith(PREFIX_SHEET)) { surface = ExcelSurface.SHEET; prefix = PREFIX_SHEET; }
+        else if (collectionName.startsWith(PREFIX_RANGE)) { surface = ExcelSurface.RANGE; prefix = PREFIX_RANGE; }
+        else return null;
+        String rest = collectionName.substring(prefix.length());
+        int idx = rest.indexOf("__");
+        if (idx < 0) return null;
+        ExcelColl c = new ExcelColl();
+        c.surface = surface;
+        c.fileSlug = rest.substring(0, idx);
+        c.entity = rest.substring(idx + 2);
+        return c;
     }
 
     static String excelSlugFromPath(String path) {
@@ -280,23 +424,10 @@ public class SharePointIntrospector {
         return trimmed.replaceAll("[^A-Za-z0-9]+", "_").toLowerCase();
     }
 
-    static ExcelRef parseExcelCollection(String collectionName) {
-        if (!collectionName.startsWith(EXCEL_PREFIX)) return null;
-        // Format: excel__<file-slug>__<table-name>
-        String rest = collectionName.substring(EXCEL_PREFIX.length());
-        int idx = rest.lastIndexOf("__");
-        if (idx < 0) return null;
-        ExcelRef ref = new ExcelRef();
-        ref.fileSlug = rest.substring(0, idx);
-        ref.tableName = rest.substring(idx + 2);
-        // The path is reconstructed by the caller; we keep slug for lookup.
-        return ref;
-    }
-
-    static class ExcelRef {
+    static class ExcelColl {
+        ExcelSurface surface;
         String fileSlug;
-        String tableName;
-        String path;
+        String entity;
     }
 
     /** Parse a comma-separated allowlist into a Set, returning empty for null/blank input. */

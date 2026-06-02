@@ -46,6 +46,7 @@ public class SharePointComputeTask implements IComputeTask {
     private final SharePointIntrospector introspector;
     private final int fetchSize;
     private final List<Filter> filters;
+    private final SharePointWorkbookReader workbook; // null for List-only connections
 
     private volatile boolean cancelled = false;
     private volatile double progress = 0.0;
@@ -57,7 +58,8 @@ public class SharePointComputeTask implements IComputeTask {
                                   String collectionName, List<String> requestedFields,
                                   SharePointTypesMapping typesMapping,
                                   SharePointIntrospector introspector,
-                                  int fetchSize, List<Filter> filters) {
+                                  int fetchSize, List<Filter> filters,
+                                  SharePointWorkbookReader workbook) {
         this.client = client;
         this.siteId = siteId;
         this.collectionName = collectionName;
@@ -66,12 +68,13 @@ public class SharePointComputeTask implements IComputeTask {
         this.introspector = introspector;
         this.fetchSize = fetchSize;
         this.filters = filters;
+        this.workbook = workbook;
     }
 
     @Override
     public Cursor compute() {
         try {
-            if (collectionName.startsWith(SharePointIntrospector.EXCEL_PREFIX)) {
+            if (SharePointIntrospector.isExcelCollection(collectionName)) {
                 return computeExcel();
             }
             return computeList();
@@ -146,26 +149,69 @@ public class SharePointComputeTask implements IComputeTask {
             return requestedFields;
         }
         // Wildcard: introspect to get all fields
-        return introspector.describeCollection(client, siteId, collectionName)
+        return introspector.describeCollection(client, siteId, collectionName, workbook)
                 .stream().map(fm -> fm.getName()).collect(Collectors.toList());
     }
 
-    // ----- Excel (v1.1) -------------------------------------------------
-    //
-    // Excel-in-SharePoint via Graph's Workbook API is on the v1.1 roadmap.
-    // The collection-name prefix is preserved so configurations don't
-    // change when support lands; for now, calls fail loudly.
+    // ----- Excel (v1.1, via Workbook API) -------------------------------
 
     private Cursor computeExcel() {
-        throw new RuntimeException("Excel-in-SharePoint is not implemented in v1. "
-                + "Configure SharePoint Lists via INCLUDE_LISTS, or wait for v1.1.");
-    }
+        if (workbook == null) {
+            throw new RuntimeException("Excel collection '" + collectionName + "' requested but no "
+                    + "workbook reader available (INCLUDE_EXCEL not configured on this connection?)");
+        }
+        SharePointIntrospector.ExcelColl c = SharePointIntrospector.parseExcelCollection(collectionName);
+        if (c == null) throw new RuntimeException("Invalid Excel collection name: " + collectionName);
+        String path = workbook.pathForSlug(c.fileSlug);
+        if (path == null) {
+            throw new RuntimeException("Excel file for slug '" + c.fileSlug
+                    + "' is not in this connection's INCLUDE_EXCEL list");
+        }
+        SharePointWorkbookReader.FileRef f = workbook.resolveFile(path);
+        if (f == null) throw new RuntimeException("Excel file not found: " + path);
 
-    /** No-op in v1; preserved to keep the factory API stable for v1.1. */
-    private Map<String, String> excelPathsBySlug;
+        List<List<Object>> grid = SharePointIntrospector.fetchExcelGrid(workbook, f, c);
+        List<String> allColumns = SharePointIntrospector.excelColumnNames(grid, c);
+        List<List<Object>> dataRows = SharePointIntrospector.excelDataRows(grid, c.surface);
 
-    void setExcelPathsBySlug(Map<String, String> m) {
-        this.excelPathsBySlug = m;
+        // Honour the QE's requested field subset/order; default to all columns.
+        List<String> fields = (requestedFields != null && !requestedFields.isEmpty()
+                && !(requestedFields.size() == 1 && "*".equals(requestedFields.get(0))))
+                ? requestedFields : allColumns;
+        this.resolvedFieldOrder = new ArrayList<>(fields);
+
+        // Map each requested field name to its column index in the grid.
+        int[] colIndex = new int[fields.size()];
+        for (int i = 0; i < fields.size(); i++) {
+            colIndex[i] = allColumns.indexOf(fields.get(i));
+        }
+
+        int cap = (fetchSize > 0 && fetchSize <= 100000) ? fetchSize : 100000;
+        records = new ArrayList<>();
+        int total = dataRows.size();
+        for (int r = 0; r < total && r < cap && !cancelled; r++) {
+            List<Object> row = dataRows.get(r);
+            Record record = new Record();
+            List<Field> out = new ArrayList<>(fields.size());
+            for (int ci : colIndex) {
+                Field field = new Field();
+                Object v = (ci >= 0 && ci < row.size()) ? row.get(ci) : null;
+                if (v == null) {
+                    field.setIsNull(true);
+                    field.setValue("");
+                } else {
+                    field.setValue(String.valueOf(v));
+                }
+                out.add(field);
+            }
+            record.setRecord(out);
+            records.add(record);
+            progress = ((double) (r + 1) / Math.max(total, 1)) * 100.0;
+        }
+        metadata = buildMetadata(fields, true);
+        progress = 100.0;
+        log.info("Excel '{}' returned {} row(s) ({} column(s))", collectionName, records.size(), fields.size());
+        return new SharePointCursor(records, metadata);
     }
 
     // ----- Filter pushdown ----------------------------------------------
@@ -280,7 +326,7 @@ public class SharePointComputeTask implements IComputeTask {
         Map<String, FieldType> declared = new HashMap<>();
         if (useDescribe) {
             try {
-                introspector.describeCollection(client, siteId, collectionName)
+                introspector.describeCollection(client, siteId, collectionName, workbook)
                         .forEach(fm -> declared.put(fm.getName(), fm.getType()));
             } catch (Exception e) {
                 log.debug("Type lookup for metadata failed; falling back to STRING: {}", e.getMessage());

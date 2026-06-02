@@ -25,8 +25,26 @@ production stack (edc-api 25.4.0, Thrift 0.21.0, Spring Boot 3.2.5, Java 17).
 | Surface | Auth | Status |
 |-----|---------|--------|
 | SharePoint Online Lists | Service principal | v1, primary target |
-| Excel-in-SharePoint | Service principal | v1.1 (stub; calls fail clearly) |
+| Excel-in-SharePoint (tables, sheets, named ranges) | Service principal | v1.1, validated E2E |
 | SharePoint on-prem | n/a | Out of scope |
+
+### Excel-in-SharePoint (v1.1)
+
+Set `INCLUDE_EXCEL` to a comma-separated list of `.xlsx` paths in the site's
+default document library (e.g. `/sophos-test.xlsx, /reports/agents.xlsx`).
+Each file contributes up to three kinds of collection:
+
+| Collection name | Source | Header row |
+|---|---|---|
+| `excel_table__<file>__<tableName>` | every named Excel table | yes (table header) |
+| `excel_sheet__<file>__<sheetName>` | every visible worksheet's used-range | yes (first row) |
+| `excel_range__<file>__<rangeName>` | every visible named range | no (synthetic column names) |
+
+Column types are inferred from the data (integers, doubles, strings). Cell
+values are read via the Graph Workbook API as raw 2D arrays (the typed SDK
+cannot represent them). No filter pushdown for Excel — the QE filters
+in-memory, so keep workbook files to a reasonable size (tens of thousands of
+rows). Dates may appear as Excel serial numbers depending on cell formatting.
 
 ## Quick start
 
@@ -186,7 +204,7 @@ In the SI UI: **Connections > Create > SharePoint**
 | CLIENT_SECRET | Yes | App registration client secret |
 | SITE_URL | Yes | SharePoint site URL, e.g. `https://contoso.sharepoint.com/sites/sales`. One site per connection. |
 | INCLUDE_LISTS | No | Comma-separated allowlist of List displayNames. Empty = all visible Lists. |
-| INCLUDE_EXCEL | No | Comma-separated paths to .xlsx files. **v1 stub**, ignored at runtime; coming in v1.1. |
+| INCLUDE_EXCEL | No | Comma-separated paths to .xlsx files in the site drive (e.g. `/sophos-test.xlsx`). Each file's tables, sheets, and named ranges become collections. See "Excel-in-SharePoint" above. |
 | AUTHORITY | No | Override `https://login.microsoftonline.com` for sovereign clouds (US Gov, China). |
 
 ## Architecture
@@ -205,10 +223,11 @@ EDC requests into Graph SDK calls. List columns are discovered via
 
 ## Known limitations
 
-- **Excel-in-SharePoint:** stub in v1. Discovery returns no Excel
-  collections; calls referencing Excel tables raise a clear error.
-  Wiring the Workbook API (`/drive/items/{id}/workbook/tables/...`)
-  is on the v1.1 roadmap.
+- **Excel-in-SharePoint:** implemented in v1.1 (tables, worksheet
+  used-ranges, named ranges) via the Graph Workbook API. No filter or
+  aggregation pushdown — the whole range is read and the QE filters
+  in-memory; keep files to tens of thousands of rows. Dates may surface as
+  Excel serial numbers depending on cell formatting.
 - **One site per connection.** SITE_URL is single-valued. Multi-site is a
   v1.1 candidate; for now create one Composer connection per SharePoint
   site.
