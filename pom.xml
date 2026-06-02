@@ -13,18 +13,25 @@
         <currentYear>2026</currentYear>
         <copyrightOwner>insightsoftware</copyrightOwner>
         <!-- Versions -->
+        <!--
+          v1.1 dep bumps (H6 audit finding). Heritage versions came from the
+          Zoomdata 2016/2017 template and carried CVE risk (guava 20 had
+          CVE-2018-10237, logback 1.1.8 had multiple, org.json 20160810
+          had CVE-2022-45688). slf4j + logback are now managed by the
+          Spring Boot BOM (no explicit version). joda-time stays for v1.1
+          (java.time migration deferred to v2 — bigger blast radius than
+          warranted here).
+        -->
         <connector-api.version>25.4.0</connector-api.version>
         <query.dsl.version>4.1.4</query.dsl.version>
-        <slf4j.version>1.7.22</slf4j.version>
-        <logback.version>1.1.8</logback.version>
-        <lombok.version>1.18.30</lombok.version>
+        <lombok.version>1.18.34</lombok.version>
         <thrift.version>0.21.0</thrift.version>
-        <dbcp2.version>2.1.1</dbcp2.version>
+        <dbcp2.version>2.13.0</dbcp2.version>
         <spring.boot.version>3.2.5</spring.boot.version>
-        <json.version>20160810</json.version>
-        <joda.time.version>2.9.4</joda.time.version>
-        <commons.lang.version>3.4</commons.lang.version>
-        <guava.version>20.0</guava.version>
+        <json.version>20250517</json.version>
+        <joda.time.version>2.13.1</joda.time.version>
+        <commons.lang.version>3.18.0</commons.lang.version>
+        <guava.version>33.4.0-jre</guava.version>
         <!-- SharePoint-specific -->
         <microsoft.graph.version>6.10.0</microsoft.graph.version>
         <azure.identity.version>1.12.0</azure.identity.version>
@@ -74,7 +81,9 @@
             <version>${thrift.version}</version>
         </dependency>
 
-        <!-- Logging (managed by Spring Boot) -->
+        <!-- Logging — versions managed entirely by Spring Boot BOM (v1.1).
+             Explicit versions on these in v1.0 pinned ancient 2016 jars and
+             dragged known CVEs along. Let Spring Boot pick the matched set. -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
@@ -179,7 +188,12 @@
                 <artifactId>exec-maven-plugin</artifactId>
                 <version>3.1.0</version>
                 <configuration>
-                    <classpathScope>runtime</classpathScope>
+                    <!-- v1.1: SharePointSmokeTest lives in src/test/java now
+                         (M4 audit fix). Test scope here includes both compile
+                         and test classpaths, so the smoke test can use the
+                         provider classes while staying out of the production
+                         jar shipped to the pod. -->
+                    <classpathScope>test</classpathScope>
                 </configuration>
             </plugin>
             <plugin>
