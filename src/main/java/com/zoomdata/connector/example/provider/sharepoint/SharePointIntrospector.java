@@ -60,8 +60,10 @@ public class SharePointIntrospector {
 
         // SharePoint Lists — follow @odata.nextLink across pages.
         try {
+            int doclibsSkipped = 0;
             for (com.microsoft.graph.models.List list : iterateAllLists(client, siteId)) {
-                if (Boolean.TRUE.equals(list.getList() != null ? list.getList().getHidden() : null)) {
+                com.microsoft.graph.models.ListInfo info = list.getList();
+                if (Boolean.TRUE.equals(info != null ? info.getHidden() : null)) {
                     continue;
                 }
                 String name = list.getDisplayName();
@@ -69,11 +71,28 @@ public class SharePointIntrospector {
                 if (includeLists != null && !includeLists.isEmpty() && !includeLists.contains(name)) {
                     continue;
                 }
+                // v1.1 (M3 audit fix): document libraries appear here but
+                // their items are DriveItem-shaped, not classic ListItem
+                // field bags. Surfacing them as collections would return
+                // mostly-null rows from /lists/{id}/items because Graph
+                // doesn't populate the field-set that way for libraries.
+                // Skip with an explicit log; the v1.1 INCLUDE_FILES path
+                // is the right way to read files from a library.
+                if (isDocumentLibrary(info)) {
+                    doclibsSkipped++;
+                    log.debug("Skipping document library '{}' (template={}); use INCLUDE_FILES to read files instead",
+                            name, info != null ? info.getTemplate() : "?");
+                    continue;
+                }
                 CollectionInfo ci = new CollectionInfo();
                 ci.setCollection(name);
                 ci.setSchema("default");
                 collections.add(ci);
                 log.debug("Discovered List: {} (id={})", name, list.getId());
+            }
+            if (doclibsSkipped > 0) {
+                log.info("Skipped {} document library/libraries at site {} — use INCLUDE_FILES " +
+                        "to expose files as collections (v1.1).", doclibsSkipped, siteId);
             }
         } catch (Exception e) {
             log.error("Failed to enumerate Lists at site {}: {}", siteId, e.getMessage());
@@ -102,10 +121,19 @@ public class SharePointIntrospector {
     }
 
     private List<FieldMetadata> describeList(GraphServiceClient client, String siteId, String listName) {
-        String listId = resolveListId(client, siteId, listName);
-        if (listId == null) {
+        com.microsoft.graph.models.List target = findListByName(client, siteId, listName);
+        if (target == null) {
             throw new RuntimeException("List not found: " + listName);
         }
+        // v1.1 (M3): refuse describe/fetch on document libraries — the
+        // List API can't return their data in a useful shape. Operator gets
+        // a clear error rather than mystery null rows. INCLUDE_FILES is
+        // the documented path for library content.
+        if (isDocumentLibrary(target.getList())) {
+            throw new RuntimeException("'" + listName + "' is a document library, not a List. "
+                    + "Use INCLUDE_FILES to expose files from this library as collections.");
+        }
+        String listId = target.getId();
 
         ColumnDefinitionCollectionResponse cols = client.sites().bySiteId(siteId)
                 .lists().byListId(listId).columns().get();
@@ -174,12 +202,28 @@ public class SharePointIntrospector {
      * silently fail for the (N>200)th list.
      */
     public String resolveListId(GraphServiceClient client, String siteId, String listName) {
+        com.microsoft.graph.models.List l = findListByName(client, siteId, listName);
+        return l != null ? l.getId() : null;
+    }
+
+    private com.microsoft.graph.models.List findListByName(GraphServiceClient client, String siteId, String listName) {
         for (com.microsoft.graph.models.List list : iterateAllLists(client, siteId)) {
             if (listName.equals(list.getDisplayName())) {
-                return list.getId();
+                return list;
             }
         }
         return null;
+    }
+
+    /**
+     * Detect whether a List is actually a document library. Graph's /lists
+     * endpoint includes both classic Lists and libraries; their items have
+     * different shapes and need different code paths.
+     */
+    private static boolean isDocumentLibrary(com.microsoft.graph.models.ListInfo info) {
+        if (info == null) return false;
+        String template = info.getTemplate();
+        return template != null && template.equalsIgnoreCase("documentLibrary");
     }
 
     /**
