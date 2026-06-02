@@ -1,7 +1,8 @@
 /**
  * Copyright (C) insightsoftware 2026. All rights reserved.
  *
- * GraphServiceClient factory with per-connection caching.
+ * GraphServiceClient factory with per-connection caching + configurable
+ * HTTP timeouts.
  *
  * Builds at most one client per (tenantId, clientId, secret-hash, authority)
  * tuple for the pod's lifetime. Reuse matters for two reasons:
@@ -19,18 +20,30 @@
  * stays cached. For a v1 EDC where one Composer connection ≈ one tenant
  * the cache rarely grows past 1-2 entries; we log a warning past 32 in
  * case of mass rotation or misconfiguration.
+ *
+ * v1.1 (M1 audit fix): connect/read timeouts are now read from
+ * framework.properties (sharepoint.connection.timeout.sec /
+ * sharepoint.read.timeout.sec). Previously declared but unread.
  */
 package com.zoomdata.connector.example.provider.sharepoint;
 
 import com.azure.identity.ClientSecretCredential;
 import com.azure.identity.ClientSecretCredentialBuilder;
+import com.microsoft.graph.core.authentication.AzureIdentityAccessTokenProvider;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
+import com.microsoft.kiota.authentication.BaseBearerTokenAuthenticationProvider;
+import com.microsoft.kiota.http.KiotaClientFactory;
+import okhttp3.OkHttpClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.time.Duration;
 import java.util.Objects;
+import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -39,10 +52,63 @@ public class SharePointGraphClient {
     private static final Logger log = LoggerFactory.getLogger(SharePointGraphClient.class);
 
     private static final String DEFAULT_AUTHORITY = "https://login.microsoftonline.com";
-    private static final String[] DEFAULT_SCOPES = new String[]{"https://graph.microsoft.com/.default"};
+    private static final String GRAPH_SCOPE = "https://graph.microsoft.com/.default";
+    private static final String[] DEFAULT_SCOPES = new String[]{GRAPH_SCOPE};
     private static final int CACHE_SIZE_WARN_THRESHOLD = 32;
 
+    // Hardcoded defaults that match framework.properties baked-in values.
+    // Used when the properties file is missing or unreadable.
+    private static final long DEFAULT_CONNECT_TIMEOUT_SEC = 30L;
+    private static final long DEFAULT_READ_TIMEOUT_SEC = 60L;
+
     private final ConcurrentMap<String, GraphServiceClient> cache = new ConcurrentHashMap<>();
+
+    // Resolved once at instance construction from framework.properties.
+    private final long connectTimeoutSec;
+    private final long readTimeoutSec;
+
+    public SharePointGraphClient() {
+        Properties props = loadFrameworkProperties();
+        this.connectTimeoutSec = parseLong(props.getProperty("sharepoint.connection.timeout.sec"),
+                DEFAULT_CONNECT_TIMEOUT_SEC);
+        this.readTimeoutSec = parseLong(props.getProperty("sharepoint.read.timeout.sec"),
+                DEFAULT_READ_TIMEOUT_SEC);
+        log.info("SharePoint Graph client configured: connectTimeout={}s, readTimeout={}s",
+                connectTimeoutSec, readTimeoutSec);
+    }
+
+    /**
+     * Test-only constructor that bypasses the framework.properties load so
+     * unit tests can pin timeouts deterministically.
+     */
+    SharePointGraphClient(long connectTimeoutSec, long readTimeoutSec) {
+        this.connectTimeoutSec = connectTimeoutSec;
+        this.readTimeoutSec = readTimeoutSec;
+    }
+
+    private Properties loadFrameworkProperties() {
+        Properties p = new Properties();
+        try (InputStream in = Thread.currentThread().getContextClassLoader()
+                .getResourceAsStream("framework.properties")) {
+            if (in != null) {
+                p.load(in);
+            } else {
+                log.warn("framework.properties not found on classpath; using built-in timeout defaults");
+            }
+        } catch (IOException e) {
+            log.warn("Failed to read framework.properties ({}); using built-in defaults", e.getMessage());
+        }
+        return p;
+    }
+
+    private static long parseLong(String value, long fallback) {
+        if (value == null || value.trim().isEmpty()) return fallback;
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
 
     public GraphServiceClient build(String tenantId, String clientId, String clientSecret, String authority) {
         if (tenantId == null || tenantId.isEmpty()) {
@@ -74,7 +140,26 @@ public class SharePointGraphClient {
                     .clientSecret(clientSecret)
                     .authorityHost(authorityHost)
                     .build();
-            return new GraphServiceClient(credential, DEFAULT_SCOPES);
+
+            // v1.1: build the OkHttp client ourselves so we can apply our
+            // configured timeouts. KiotaClientFactory.create() returns a
+            // builder pre-populated with the standard Kiota interceptor
+            // chain (auth, retry, redirect, parameter sanitisation, etc.)
+            // — we only override timeouts on top.
+            OkHttpClient httpClient = KiotaClientFactory.create()
+                    .connectTimeout(Duration.ofSeconds(connectTimeoutSec))
+                    .readTimeout(Duration.ofSeconds(readTimeoutSec))
+                    .writeTimeout(Duration.ofSeconds(readTimeoutSec))
+                    .build();
+
+            // 1-arg constructor uses default Graph scopes (.default) and
+            // default observability options — exactly what we want.
+            AzureIdentityAccessTokenProvider tokenProvider =
+                    new AzureIdentityAccessTokenProvider(credential);
+            BaseBearerTokenAuthenticationProvider authProvider =
+                    new BaseBearerTokenAuthenticationProvider(tokenProvider);
+
+            return new GraphServiceClient(authProvider, httpClient);
         });
     }
 
@@ -93,6 +178,10 @@ public class SharePointGraphClient {
     int cacheSize() {
         return cache.size();
     }
+
+    /** Test/diagnostic helper for the resolved timeouts. */
+    long connectTimeoutSec() { return connectTimeoutSec; }
+    long readTimeoutSec() { return readTimeoutSec; }
 
     /**
      * Convert a SharePoint site URL like

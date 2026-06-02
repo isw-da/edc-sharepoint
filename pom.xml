@@ -67,6 +67,21 @@
             <version>${azure.identity.version}</version>
         </dependency>
 
+        <!-- Kiota OkHttp middleware — required at compile scope so we can
+             build a custom OkHttpClient with configurable timeouts (M1
+             audit fix). Pulled transitively by microsoft-graph but only at
+             runtime scope; we need it on the compile classpath too. -->
+        <dependency>
+            <groupId>com.microsoft.kiota</groupId>
+            <artifactId>microsoft-kiota-http-okHttp</artifactId>
+            <version>1.1.11</version>
+        </dependency>
+        <dependency>
+            <groupId>com.microsoft.kiota</groupId>
+            <artifactId>microsoft-kiota-authentication-azure</artifactId>
+            <version>1.1.11</version>
+        </dependency>
+
         <!-- EDC API (Thrift generated classes) -->
         <dependency>
             <groupId>com.zoomdata</groupId>
