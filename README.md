@@ -202,10 +202,33 @@ In the SI UI: **Connections > Create > SharePoint**
 | TENANT_ID | Yes | Azure AD tenant ID (GUID or `contoso.onmicrosoft.com`) |
 | CLIENT_ID | Yes | App registration client (application) ID |
 | CLIENT_SECRET | Yes | App registration client secret |
-| SITE_URL | Yes | SharePoint site URL, e.g. `https://contoso.sharepoint.com/sites/sales`. One site per connection. |
-| INCLUDE_LISTS | No | Comma-separated allowlist of List displayNames. Empty = all visible Lists. |
+| SITE_URL | One of | Single SharePoint site URL, e.g. `https://contoso.sharepoint.com/sites/sales`. The single-site form. |
+| SITE_URLS | One of | Comma-separated site URLs for a multi-site connection (v1.1). Takes precedence over SITE_URL. See "Multi-site" below. |
+| INCLUDE_LISTS | No | Comma-separated allowlist of List displayNames. Empty = all visible Lists. Applied to every configured site. |
 | INCLUDE_EXCEL | No | Comma-separated paths to .xlsx files in the site drive (e.g. `/sophos-test.xlsx`). Each file's tables, sheets, and named ranges become collections. See "Excel-in-SharePoint" above. |
 | AUTHORITY | No | Override `https://login.microsoftonline.com` for sovereign clouds (US Gov, China). |
+
+One of `SITE_URL` or `SITE_URLS` is required.
+
+### Multi-site (v1.1)
+
+Set `SITE_URLS` to a comma-separated list of site URLs to expose Lists and
+Excel from several sites through one connection (e.g. a Finance, Sales, and
+IT site). All other params (auth, INCLUDE_LISTS, INCLUDE_EXCEL) apply to
+every site.
+
+- **Single site** (one URL, or `SITE_URL`): collection names are exactly as
+  in v1 — `Events`, `excel_table__file__tbl`, etc.
+- **Multiple sites**: each collection name is prefixed with the site slug
+  (last URL path segment, e.g. `sales__Events`, `finance__excel_table__...`)
+  to disambiguate. The slug is derived from the URL; if two sites slug to
+  the same value they are suffixed `_2`, `_3`.
+
+Backwards compatible: existing single-site connections keep their exact
+collection names, so sources built against them keep working. Migrating a
+single-site connection to multi-site renames its collections (they gain the
+prefix) — rebind those sources after migrating. An INCLUDE_EXCEL path that
+doesn't exist in a given site is simply skipped for that site.
 
 ## Architecture
 

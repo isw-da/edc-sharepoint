@@ -267,4 +267,36 @@ public class SharePointGraphClient {
             throw new IllegalArgumentException("Invalid SITE_URL: " + siteUrl, e);
         }
     }
+
+    /**
+     * Human-readable slug for a site, used to prefix collection names in
+     * multi-site connections. Last non-empty path segment (e.g. "sales" for
+     * .../sites/sales); falls back to the host's first DNS label for a root
+     * site. Lowercased, non-alphanumeric runs collapsed to a single "_", so
+     * the slug never contains "__" (the collection-name delimiter).
+     */
+    public String siteSlugFromUrl(String siteUrl) {
+        if (siteUrl == null || siteUrl.isEmpty()) {
+            throw new IllegalArgumentException("site URL is required");
+        }
+        try {
+            URI uri = new URI(siteUrl);
+            String host = uri.getHost();
+            String path = uri.getPath();
+            String raw = null;
+            if (path != null) {
+                String[] segs = path.split("/");
+                for (int i = segs.length - 1; i >= 0; i--) {
+                    if (!segs[i].isEmpty()) { raw = segs[i]; break; }
+                }
+            }
+            if (raw == null) {
+                raw = (host != null && host.contains(".")) ? host.substring(0, host.indexOf('.')) : host;
+            }
+            if (raw == null || raw.isEmpty()) raw = "site";
+            return raw.replaceAll("[^A-Za-z0-9]+", "_").toLowerCase();
+        } catch (URISyntaxException e) {
+            throw new IllegalArgumentException("Invalid site URL: " + siteUrl, e);
+        }
+    }
 }

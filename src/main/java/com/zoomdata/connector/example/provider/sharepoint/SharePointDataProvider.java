@@ -72,7 +72,8 @@ public class SharePointDataProvider extends AbstractDataProvider {
     private static final String PARAM_TENANT_ID = "TENANT_ID";
     private static final String PARAM_CLIENT_ID = "CLIENT_ID";
     private static final String PARAM_CLIENT_SECRET = "CLIENT_SECRET";
-    private static final String PARAM_SITE_URL = "SITE_URL";
+    private static final String PARAM_SITE_URL = "SITE_URL";   // single-site (v1) — alias for SITE_URLS
+    private static final String PARAM_SITE_URLS = "SITE_URLS";  // v1.1 multi-site, comma-separated
     private static final String PARAM_INCLUDE_LISTS = "INCLUDE_LISTS";
     private static final String PARAM_INCLUDE_EXCEL = "INCLUDE_EXCEL";
     private static final String PARAM_AUTHORITY = "AUTHORITY";
@@ -86,8 +87,14 @@ public class SharePointDataProvider extends AbstractDataProvider {
     public ValidateSourceResponse pingSource(ValidateSourceRequest request) {
         try {
             ConnContext ctx = context(request.getRequestInfo());
-            boolean ok = introspector.validateConnection(ctx.client, ctx.siteId);
-            return new ValidateSourceResponse(ok ? ok() : serverError("Failed to connect to SharePoint site"));
+            // Validate every configured site; fail with the first unreachable one.
+            for (SiteCtx s : ctx.sites) {
+                if (!introspector.validateConnection(ctx.client, s.siteId)) {
+                    return new ValidateSourceResponse(
+                            serverError("Failed to connect to SharePoint site: " + s.siteUrl));
+                }
+            }
+            return new ValidateSourceResponse(ok());
         } catch (Exception e) {
             log.error("pingSource failed: {}", e.getMessage());
             return new ValidateSourceResponse(serverError(safeMessage(e)));
@@ -99,8 +106,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
         try {
             ConnContext ctx = context(request.getRequestInfo());
             String collectionName = request.getCollectionInfo().getCollection();
-            List<CollectionInfo> collections = introspector.getCollections(
-                    ctx.client, ctx.siteId, ctx.includeLists, ctx.includeExcel, ctx.workbook);
+            List<CollectionInfo> collections = allCollections(ctx);
             boolean found = collections.stream().anyMatch(c -> c.getCollection().equals(collectionName));
             return new ValidateCollectionResponse(found ? ok() : serverError("Collection not found: " + collectionName));
         } catch (Exception e) {
@@ -139,8 +145,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
     public MetaCollectionsResponse collections(MetaCollectionsRequest request) {
         try {
             ConnContext ctx = context(request.getRequestInfo());
-            List<CollectionInfo> collections = introspector.getCollections(
-                    ctx.client, ctx.siteId, ctx.includeLists, ctx.includeExcel, ctx.workbook);
+            List<CollectionInfo> collections = allCollections(ctx);
             return new MetaCollectionsResponse(collections, ok());
         } catch (Exception e) {
             log.error("collections failed: {}", e.getMessage());
@@ -153,7 +158,8 @@ public class SharePointDataProvider extends AbstractDataProvider {
         try {
             ConnContext ctx = context(request.getRequestInfo());
             String collectionName = request.getCollectionInfo().getCollection();
-            List<FieldMetadata> fields = introspector.describeCollection(ctx.client, ctx.siteId, collectionName, ctx.workbook);
+            Resolved r = resolve(ctx, collectionName);
+            List<FieldMetadata> fields = introspector.describeCollection(ctx.client, r.siteId, r.entity, r.workbook);
             return new MetaDescribeResponse(fields, ok());
         } catch (Exception e) {
             log.error("describe failed: {}", e.getMessage());
@@ -165,8 +171,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
     public MetaDescribeSchemaResponse describeSchemas(MetaDescribeSchemaRequest request) {
         try {
             ConnContext ctx = context(request.getRequestInfo());
-            List<CollectionInfo> all = introspector.getCollections(ctx.client, ctx.siteId,
-                    ctx.includeLists, ctx.includeExcel, ctx.workbook);
+            List<CollectionInfo> all = allCollections(ctx);
 
             List<CollectionInfo> requested = request.getCollections();
             if (requested != null && !requested.isEmpty()) {
@@ -179,8 +184,9 @@ public class SharePointDataProvider extends AbstractDataProvider {
             List<CollectionInfo> enriched = new ArrayList<>();
             for (CollectionInfo ci : all) {
                 try {
+                    Resolved r = resolve(ctx, ci.getCollection());
                     List<FieldMetadata> fields = introspector.describeCollection(
-                            ctx.client, ctx.siteId, ci.getCollection(), ctx.workbook);
+                            ctx.client, r.siteId, r.entity, r.workbook);
                     CollectionInfo e2 = new CollectionInfo();
                     e2.setCollection(ci.getCollection());
                     e2.setSchema("default");
@@ -207,12 +213,13 @@ public class SharePointDataProvider extends AbstractDataProvider {
         try {
             ConnContext ctx = context(request.getRequestInfo());
             String collectionName = request.getCollectionInfo().getCollection();
-            List<FieldMetadata> fieldMeta = introspector.describeCollection(ctx.client, ctx.siteId, collectionName, ctx.workbook);
+            Resolved r = resolve(ctx, collectionName);
+            List<FieldMetadata> fieldMeta = introspector.describeCollection(ctx.client, r.siteId, r.entity, r.workbook);
             List<String> fieldNames = fieldMeta.stream().map(FieldMetadata::getName).collect(Collectors.toList());
 
             SharePointComputeTask task = new SharePointComputeTask(
-                    ctx.client, ctx.siteId, collectionName, fieldNames,
-                    typesMapping, introspector, 10, null, ctx.workbook);
+                    ctx.client, r.siteId, r.entity, fieldNames,
+                    typesMapping, introspector, 10, null, r.workbook);
             SharePointComputeTask.SharePointCursor cursor =
                     (SharePointComputeTask.SharePointCursor) task.compute();
 
@@ -253,6 +260,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
             } else {
                 throw new IllegalArgumentException("No collection info in request");
             }
+            Resolved r = resolve(ctx, collectionName);
 
             List<String> requestedFields = extractFieldsFromRequest(request);
 
@@ -267,8 +275,8 @@ public class SharePointDataProvider extends AbstractDataProvider {
                 }
             }
 
-            return new SharePointComputeTaskFactory(ctx.client, ctx.siteId, collectionName,
-                    requestedFields, typesMapping, introspector, fetchSize, filters, ctx.workbook);
+            return new SharePointComputeTaskFactory(ctx.client, r.siteId, r.entity,
+                    requestedFields, typesMapping, introspector, fetchSize, filters, r.workbook);
         } catch (Exception e) {
             throw new ExecuteException("Failed to create compute task: " + safeMessage(e));
         }
@@ -330,8 +338,13 @@ public class SharePointDataProvider extends AbstractDataProvider {
                                 .description("App registration client secret"))
                 .addParameters(
                         stringParameter(PARAM_SITE_URL)
-                                .isRequired(true)
-                                .description("SharePoint site URL, e.g. https://contoso.sharepoint.com/sites/sales"))
+                                .description("Single SharePoint site URL, e.g. "
+                                        + "https://contoso.sharepoint.com/sites/sales. Use this OR SITE_URLS."))
+                .addParameters(
+                        stringParameter(PARAM_SITE_URLS)
+                                .description("Comma-separated SharePoint site URLs for a multi-site connection. "
+                                        + "When >1 site, collection names are prefixed with the site slug. "
+                                        + "Takes precedence over SITE_URL."))
                 .addParameters(
                         stringParameter(PARAM_INCLUDE_LISTS)
                                 .description("Comma-separated allowlist of List displayNames. Empty = all visible Lists."))
@@ -369,43 +382,135 @@ public class SharePointDataProvider extends AbstractDataProvider {
         return null;
     }
 
-    // ----- Connection context -------------------------------------------
+    // ----- Connection context + multi-site routing ----------------------
 
     /**
-     * Bundle of the GraphServiceClient + resolved site identifier + parsed
-     * include lists for one EDC call. Built once per request from the
-     * connection params.
+     * Bundle of the GraphServiceClient + per-site contexts + parsed include
+     * lists for one EDC call. Built once per request from the connection
+     * params.
+     *
+     * Multi-site (v1.1): SITE_URLS is a comma-separated list; SITE_URL is the
+     * single-site alias (if both set, SITE_URLS wins and SITE_URL is ignored
+     * with a warning). When more than one site is configured, collection
+     * names are prefixed with "<site-slug>__" to disambiguate; single-site
+     * connections keep the exact v1 names.
      */
     private ConnContext context(RequestInfo info) {
         String tenantId = param(info, PARAM_TENANT_ID, true);
         String clientId = param(info, PARAM_CLIENT_ID, true);
         String clientSecret = param(info, PARAM_CLIENT_SECRET, true);
-        String siteUrl = param(info, PARAM_SITE_URL, true);
+        String siteUrls = param(info, PARAM_SITE_URLS, false);
+        String siteUrl = param(info, PARAM_SITE_URL, false);
         String authority = param(info, PARAM_AUTHORITY, false);
         String includeLists = param(info, PARAM_INCLUDE_LISTS, false);
         String includeExcel = param(info, PARAM_INCLUDE_EXCEL, false);
 
+        List<String> urls;
+        if (siteUrls != null && !siteUrls.trim().isEmpty()) {
+            urls = SharePointIntrospector.parsePaths(siteUrls);
+            if (siteUrl != null && !siteUrl.isEmpty()) {
+                log.warn("Both SITE_URLS and SITE_URL are set; using SITE_URLS and ignoring SITE_URL");
+            }
+        } else if (siteUrl != null && !siteUrl.isEmpty()) {
+            urls = Collections.singletonList(siteUrl);
+        } else {
+            throw new IllegalArgumentException("One of SITE_URL or SITE_URLS is required");
+        }
+
         GraphServiceClient client = graphFactory.build(tenantId, clientId, clientSecret, authority);
-        String siteId = graphFactory.siteIdFromUrl(siteUrl);
 
         ConnContext ctx = new ConnContext();
         ctx.client = client;
-        ctx.siteId = siteId;
         ctx.includeLists = SharePointIntrospector.parseAllowlist(includeLists);
         ctx.includeExcel = SharePointIntrospector.parsePaths(includeExcel);
         ctx.excelPathsBySlug = new HashMap<>();
         for (String p : ctx.includeExcel) {
             ctx.excelPathsBySlug.put(SharePointIntrospector.excelSlugFromPath(p), p);
         }
-        // Build the Workbook reader only when Excel paths are configured —
-        // List-only connections never mint a Workbook token. The reader
-        // shares the cached credential + OkHttp client from graphFactory.
-        if (!ctx.includeExcel.isEmpty()) {
-            String token = graphFactory.bearerToken(tenantId, clientId, clientSecret, authority);
-            ctx.workbook = new SharePointWorkbookReader(
-                    graphFactory.rawHttpClient(), token, siteId, ctx.excelPathsBySlug);
+
+        // Mint a Workbook token once and share it across all per-site readers
+        // (same credentials, same MSAL cache). Only when Excel is configured.
+        String token = ctx.includeExcel.isEmpty() ? null
+                : graphFactory.bearerToken(tenantId, clientId, clientSecret, authority);
+
+        ctx.sites = new ArrayList<>();
+        Set<String> usedSlugs = new java.util.HashSet<>();
+        for (String url : urls) {
+            SiteCtx s = new SiteCtx();
+            s.siteUrl = url;
+            s.siteId = graphFactory.siteIdFromUrl(url);
+            String slug = graphFactory.siteSlugFromUrl(url);
+            // Disambiguate the rare case of two sites slugging to the same value.
+            String unique = slug;
+            int n = 2;
+            while (!usedSlugs.add(unique)) unique = slug + "_" + (n++);
+            s.siteSlug = unique;
+            if (token != null) {
+                s.workbook = new SharePointWorkbookReader(
+                        graphFactory.rawHttpClient(), token, s.siteId, ctx.excelPathsBySlug);
+            }
+            ctx.sites.add(s);
         }
+        ctx.multiSite = ctx.sites.size() > 1;
         return ctx;
+    }
+
+    /**
+     * Discover collections across all configured sites, prefixing each name
+     * with "<site-slug>__" only in multi-site connections (single-site keeps
+     * the v1 names unchanged).
+     */
+    private List<CollectionInfo> allCollections(ConnContext ctx) {
+        List<CollectionInfo> out = new ArrayList<>();
+        for (SiteCtx s : ctx.sites) {
+            List<CollectionInfo> siteCols = introspector.getCollections(
+                    ctx.client, s.siteId, ctx.includeLists, ctx.includeExcel, s.workbook);
+            for (CollectionInfo ci : siteCols) {
+                if (ctx.multiSite) {
+                    CollectionInfo p = new CollectionInfo();
+                    p.setCollection(s.siteSlug + "__" + ci.getCollection());
+                    p.setSchema("default");
+                    out.add(p);
+                } else {
+                    out.add(ci);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Route a (possibly site-prefixed) collection name back to its site and
+     * the underlying entity collection name. Single-site: the name passes
+     * through unchanged. Multi-site: peel the first "<slug>__" segment (site
+     * slugs never contain "__"), match it to a configured site, and hand the
+     * remainder to the per-site code path.
+     */
+    private Resolved resolve(ConnContext ctx, String collectionName) {
+        Resolved r = new Resolved();
+        if (!ctx.multiSite) {
+            SiteCtx s = ctx.sites.get(0);
+            r.siteId = s.siteId;
+            r.workbook = s.workbook;
+            r.entity = collectionName;
+            return r;
+        }
+        int i = collectionName.indexOf("__");
+        if (i < 0) {
+            throw new IllegalArgumentException("Collection '" + collectionName
+                    + "' is not site-qualified in a multi-site connection");
+        }
+        String slug = collectionName.substring(0, i);
+        String entity = collectionName.substring(i + 2);
+        for (SiteCtx s : ctx.sites) {
+            if (s.siteSlug.equals(slug)) {
+                r.siteId = s.siteId;
+                r.workbook = s.workbook;
+                r.entity = entity;
+                return r;
+            }
+        }
+        throw new IllegalArgumentException("No configured site matches slug '" + slug + "'");
     }
 
     private String param(RequestInfo info, String name, boolean required) {
@@ -422,10 +527,25 @@ public class SharePointDataProvider extends AbstractDataProvider {
 
     private static class ConnContext {
         GraphServiceClient client;
-        String siteId;
         Set<String> includeLists;
         List<String> includeExcel;
         Map<String, String> excelPathsBySlug;
+        List<SiteCtx> sites;
+        boolean multiSite;
+    }
+
+    /** Per-site resolved state. One per configured SITE_URL(S) entry. */
+    private static class SiteCtx {
+        String siteUrl;
+        String siteSlug;
+        String siteId;
         SharePointWorkbookReader workbook; // null when no INCLUDE_EXCEL paths
+    }
+
+    /** Result of routing a collection name to its site + entity. */
+    private static class Resolved {
+        String siteId;
+        SharePointWorkbookReader workbook;
+        String entity;
     }
 }
