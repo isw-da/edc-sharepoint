@@ -27,7 +27,7 @@ production stack (edc-api 25.4.0, Thrift 0.21.0, Spring Boot 3.2.5, Java 17).
 | SharePoint Online Lists | Service principal | v1, primary target |
 | Excel-in-SharePoint (tables, sheets, named ranges) | Service principal | v1.1, validated E2E |
 | CSV / TSV / JSON files in a drive | Service principal | v1.1, validated E2E |
-| OneDrive for Business (Excel + files) | Service principal | v1.1, connector validated; live data path pending a provisioned OneDrive |
+| OneDrive for Business (Excel + files) | Service principal | v1.1, validated E2E (describe + data through Composer) |
 | Parquet / Avro / ORC / XML files | n/a | v2 (need columnar/streaming libs or shape config) |
 | PDF / Word / PowerPoint / images | n/a | Out of scope — unstructured, not a tabular EDC |
 | SharePoint on-prem | n/a | Out of scope |
@@ -93,6 +93,21 @@ Internally this is the same engine as the SharePoint connector: the Excel
 and file readers are rooted at `/users/{upn}/drive` instead of
 `/sites/{id}/drive`, and List discovery is skipped. Multi-user routing,
 type inference, and the no-pushdown / leading-zero behaviours are identical.
+
+**Deployment — one connector per pod.** The Zoomdata EDC framework only
+auto-selects a provider when a server process hosts exactly one connector;
+with two it requires a `CONNECTOR_TYPE` param on every request, which would
+break connections that don't set it. So SharePoint and OneDrive run as
+separate pods from the **same image**, selected by the `EDC_CONNECTOR` env
+var:
+
+| Pod | `EDC_CONNECTOR` | Connector |
+|---|---|---|
+| default (unset) | — | `SHAREPOINT` only (v1 behaviour, existing connections unchanged) |
+| OneDrive pod | `SHAREPOINT_ONEDRIVE` | `SHAREPOINT_ONEDRIVE` only |
+
+Register each pod as its own Consul service and point its Composer connector
+at that `SERVICE_NAME`.
 
 ## Quick start
 

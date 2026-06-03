@@ -22,6 +22,7 @@ import com.zoomdata.connector.example.framework.provider.serverdescription.Gener
 import com.zoomdata.gen.edc.request.RequestInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 import java.util.Collections;
 import java.util.List;
@@ -30,7 +31,10 @@ import static com.zoomdata.connector.example.framework.provider.serverdescriptio
 import static com.zoomdata.connector.example.framework.provider.serverdescription.connectionparameters.impl.StringConnectionParameter.StringConnectionParameterBuilder.stringParameter;
 import static com.zoomdata.connector.example.provider.sharepoint.SharePointOneDriveProvider.ONEDRIVE_TYPE;
 
+// Active only when EDC_CONNECTOR=SHAREPOINT_ONEDRIVE — runs as its own pod so
+// each server process hosts exactly one connector (see SharePointDataProvider).
 @Connector(ONEDRIVE_TYPE)
+@ConditionalOnProperty(name = "edc.connector", havingValue = "SHAREPOINT_ONEDRIVE")
 public class SharePointOneDriveProvider extends SharePointDataProvider {
 
     protected static final String ONEDRIVE_TYPE = "SHAREPOINT_ONEDRIVE";

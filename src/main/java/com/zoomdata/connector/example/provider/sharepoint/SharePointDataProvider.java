@@ -47,6 +47,7 @@ import com.zoomdata.gen.edc.types.SampleField;
 import com.zoomdata.gen.edc.types.SampleRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -62,7 +63,14 @@ import static com.zoomdata.connector.example.framework.provider.serverdescriptio
 import static com.zoomdata.connector.example.framework.provider.serverdescription.connectionparameters.impl.StringConnectionParameter.StringConnectionParameterBuilder.stringParameter;
 import static com.zoomdata.connector.example.provider.sharepoint.SharePointDataProvider.CONNECTION_TYPE;
 
+// One connector per server process: the Zoomdata framework only auto-selects
+// a provider when exactly one @Connector bean exists; with two it demands a
+// CONNECTOR_TYPE param on every request (breaking connections that lack it).
+// So each provider is gated by the `edc.connector` property (env EDC_CONNECTOR).
+// Default (unset) = SharePoint only, preserving v1 behaviour and existing
+// connections. The OneDrive pod sets EDC_CONNECTOR=SHAREPOINT_ONEDRIVE.
 @Connector(CONNECTION_TYPE)
+@ConditionalOnProperty(name = "edc.connector", havingValue = "SHAREPOINT", matchIfMissing = true)
 public class SharePointDataProvider extends AbstractDataProvider {
 
     private static final Logger log = LoggerFactory.getLogger(SharePointDataProvider.class);
