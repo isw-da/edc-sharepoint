@@ -47,7 +47,7 @@ public class FileSmokeTest {
         for (String p : SharePointIntrospector.parsePaths(files)) {
             pathsBySlug.put(SharePointIntrospector.fileSlugFromPath(p), p);
         }
-        SharePointFileReader fr = new SharePointFileReader(gf.rawHttpClient(), token, siteId, pathsBySlug);
+        SharePointFileReader fr = new SharePointFileReader(gf.rawHttpClient(), token, "sites/" + siteId + "/drive", pathsBySlug);
         SharePointReaders readers = new SharePointReaders(null, fr);
 
         System.out.println("--- 1. Discover file collections ---");

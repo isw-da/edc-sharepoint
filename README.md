@@ -27,6 +27,7 @@ production stack (edc-api 25.4.0, Thrift 0.21.0, Spring Boot 3.2.5, Java 17).
 | SharePoint Online Lists | Service principal | v1, primary target |
 | Excel-in-SharePoint (tables, sheets, named ranges) | Service principal | v1.1, validated E2E |
 | CSV / TSV / JSON files in a drive | Service principal | v1.1, validated E2E |
+| OneDrive for Business (Excel + files) | Service principal | v1.1, connector validated; live data path pending a provisioned OneDrive |
 | Parquet / Avro / ORC / XML files | n/a | v2 (need columnar/streaming libs or shape config) |
 | PDF / Word / PowerPoint / images | n/a | Out of scope — unstructured, not a tabular EDC |
 | SharePoint on-prem | n/a | Out of scope |
@@ -72,6 +73,26 @@ Notes and limits:
   cell rather than being flattened into columns.
 - Unsupported extensions (e.g. `.parquet`, `.xml`) are skipped at discovery
   with a warning.
+
+### OneDrive for Business (v1.1)
+
+A separate connector, **subStorageType `SHAREPOINT_ONEDRIVE`**, for reading
+Excel + CSV/JSON files from users' personal OneDrives. Same Microsoft Graph
+app-only auth; OneDrive has no SharePoint Lists, so only `INCLUDE_EXCEL` and
+`INCLUDE_FILES` apply.
+
+| Parameter | Required | Description |
+|---|---|---|
+| TENANT_ID / CLIENT_ID / CLIENT_SECRET | Yes | Same app registration as the SharePoint connector. Needs `Files.Read.All`. |
+| USER_UPN | One of | Single user, e.g. `jane@contoso.com`. |
+| USER_UPNS | One of | Comma-separated UPNs for a multi-user connection. When >1, collection names are prefixed with the user slug (the UPN local part). |
+| INCLUDE_EXCEL / INCLUDE_FILES | No | Paths within each user's OneDrive (e.g. `/Reports/agents.xlsx`). |
+| AUTHORITY | No | Sovereign-cloud authority override. |
+
+Internally this is the same engine as the SharePoint connector: the Excel
+and file readers are rooted at `/users/{upn}/drive` instead of
+`/sites/{id}/drive`, and List discovery is skipped. Multi-user routing,
+type inference, and the no-pushdown / leading-zero behaviours are identical.
 
 ## Quick start
 

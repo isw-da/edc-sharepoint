@@ -50,14 +50,17 @@ public class SharePointWorkbookReader {
 
     private final OkHttpClient http;
     private final String bearerToken;
-    private final String siteId;
+    // Graph resource path for the drive container: "sites/{siteId}/drive"
+    // (SharePoint) or "users/{upn}/drive" (OneDrive). The reader is otherwise
+    // identical for both.
+    private final String driveResourcePath;
     private final Map<String, String> pathsBySlug;
 
-    public SharePointWorkbookReader(OkHttpClient http, String bearerToken, String siteId,
+    public SharePointWorkbookReader(OkHttpClient http, String bearerToken, String driveResourcePath,
                                     Map<String, String> pathsBySlug) {
         this.http = http;
         this.bearerToken = bearerToken;
-        this.siteId = siteId;
+        this.driveResourcePath = driveResourcePath;
         this.pathsBySlug = pathsBySlug != null ? pathsBySlug : Collections.emptyMap();
     }
 
@@ -85,9 +88,9 @@ public class SharePointWorkbookReader {
      */
     public FileRef resolveFile(String path) {
         String normalised = path.startsWith("/") ? path.substring(1) : path;
-        // GET /sites/{siteId}/drive/root:/{path}  (path segment-encoded)
-        String url = GRAPH_BASE + "/sites/" + encodePathLiteral(siteId)
-                + "/drive/root:/" + encodeDrivePath(normalised)
+        // GET /{driveResourcePath}/root:/{path}  (path segment-encoded)
+        String url = GRAPH_BASE + "/" + driveResourcePath
+                + "/root:/" + encodeDrivePath(normalised)
                 + "?$select=id,parentReference,file";
         try {
             JsonNode item = getJson(url);

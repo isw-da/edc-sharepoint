@@ -47,14 +47,15 @@ public class SharePointFileReader {
 
     private final OkHttpClient http;
     private final String bearerToken;
-    private final String siteId;
+    // "sites/{siteId}/drive" (SharePoint) or "users/{upn}/drive" (OneDrive).
+    private final String driveResourcePath;
     private final Map<String, String> pathsBySlug;
 
-    public SharePointFileReader(OkHttpClient http, String bearerToken, String siteId,
+    public SharePointFileReader(OkHttpClient http, String bearerToken, String driveResourcePath,
                                 Map<String, String> pathsBySlug) {
         this.http = http;
         this.bearerToken = bearerToken;
-        this.siteId = siteId;
+        this.driveResourcePath = driveResourcePath;
         this.pathsBySlug = pathsBySlug != null ? pathsBySlug : java.util.Collections.emptyMap();
     }
 
@@ -96,8 +97,8 @@ public class SharePointFileReader {
 
     private InputStream download(String path) throws IOException {
         String normalised = path.startsWith("/") ? path.substring(1) : path;
-        String url = GRAPH_BASE + "/sites/" + siteId.replace(" ", "%20")
-                + "/drive/root:/" + encodeDrivePath(normalised) + ":/content";
+        String url = GRAPH_BASE + "/" + driveResourcePath
+                + "/root:/" + encodeDrivePath(normalised) + ":/content";
         Request req = new Request.Builder().url(url)
                 .header("Authorization", "Bearer " + bearerToken)
                 .get().build();

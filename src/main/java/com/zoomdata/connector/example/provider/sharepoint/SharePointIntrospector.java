@@ -71,8 +71,10 @@ public class SharePointIntrospector {
                                                 Set<String> includeLists, SharePointReaders readers) {
         List<CollectionInfo> collections = new ArrayList<>();
 
-        // SharePoint Lists — follow @odata.nextLink across pages.
-        try {
+        // SharePoint Lists — follow @odata.nextLink across pages. Skipped
+        // entirely for drive-only containers (OneDrive: siteId == null), which
+        // have no SharePoint lists.
+        if (siteId != null) try {
             int doclibsSkipped = 0;
             for (com.microsoft.graph.models.List list : iterateAllLists(client, siteId)) {
                 com.microsoft.graph.models.ListInfo info = list.getList();

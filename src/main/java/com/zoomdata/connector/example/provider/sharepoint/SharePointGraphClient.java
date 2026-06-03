@@ -113,6 +113,21 @@ public class SharePointGraphClient {
         return rawHttpClient;
     }
 
+    /** GET a Graph URL with the given bearer token; true on a 2xx response.
+     *  Used to validate a drive container (e.g. /users/{upn}/drive) reachably
+     *  without the typed SDK. */
+    public boolean ping(String graphUrl, String bearerToken) {
+        okhttp3.Request req = new okhttp3.Request.Builder().url(graphUrl)
+                .header("Authorization", "Bearer " + bearerToken)
+                .header("Accept", "application/json").get().build();
+        try (okhttp3.Response resp = rawHttpClient.newCall(req).execute()) {
+            return resp.code() >= 200 && resp.code() < 300;
+        } catch (Exception e) {
+            log.warn("Graph ping failed for {}: {}", graphUrl, e.getMessage());
+            return false;
+        }
+    }
+
     /**
      * Acquire a Graph bearer token for the given credentials, reusing the
      * cached ClientSecretCredential (and its MSAL token cache). Synchronous —

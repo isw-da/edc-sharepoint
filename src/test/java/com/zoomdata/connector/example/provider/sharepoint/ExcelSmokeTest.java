@@ -46,7 +46,7 @@ public class ExcelSmokeTest {
         Map<String, String> pathsBySlug = new HashMap<>();
         pathsBySlug.put(SharePointIntrospector.excelSlugFromPath(excelPath), excelPath);
         SharePointWorkbookReader wb = new SharePointWorkbookReader(
-                gf.rawHttpClient(), token, siteId, pathsBySlug);
+                gf.rawHttpClient(), token, "sites/" + siteId + "/drive", pathsBySlug);
         SharePointReaders readers = new SharePointReaders(wb, null);
 
         System.out.println("--- 1. Discover Excel collections ---");

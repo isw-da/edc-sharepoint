@@ -69,30 +69,31 @@ public class SharePointDataProvider extends AbstractDataProvider {
 
     protected static final String CONNECTION_TYPE = "SHAREPOINT";
 
-    private static final String PARAM_TENANT_ID = "TENANT_ID";
-    private static final String PARAM_CLIENT_ID = "CLIENT_ID";
-    private static final String PARAM_CLIENT_SECRET = "CLIENT_SECRET";
-    private static final String PARAM_SITE_URL = "SITE_URL";   // single-site (v1) — alias for SITE_URLS
-    private static final String PARAM_SITE_URLS = "SITE_URLS";  // v1.1 multi-site, comma-separated
-    private static final String PARAM_INCLUDE_LISTS = "INCLUDE_LISTS";
-    private static final String PARAM_INCLUDE_EXCEL = "INCLUDE_EXCEL";
-    private static final String PARAM_INCLUDE_FILES = "INCLUDE_FILES";  // v1.1 CSV/TSV/JSON
-    private static final String PARAM_AUTHORITY = "AUTHORITY";
+    protected static final String PARAM_TENANT_ID = "TENANT_ID";
+    protected static final String PARAM_CLIENT_ID = "CLIENT_ID";
+    protected static final String PARAM_CLIENT_SECRET = "CLIENT_SECRET";
+    protected static final String PARAM_SITE_URL = "SITE_URL";   // single-site (v1) — alias for SITE_URLS
+    protected static final String PARAM_SITE_URLS = "SITE_URLS";  // v1.1 multi-site, comma-separated
+    protected static final String PARAM_INCLUDE_LISTS = "INCLUDE_LISTS";
+    protected static final String PARAM_INCLUDE_EXCEL = "INCLUDE_EXCEL";
+    protected static final String PARAM_INCLUDE_FILES = "INCLUDE_FILES";  // v1.1 CSV/TSV/JSON
+    protected static final String PARAM_AUTHORITY = "AUTHORITY";
 
-    private final SharePointTypesMapping typesMapping = new SharePointTypesMapping();
-    private final SharePointFeatures features = new SharePointFeatures();
-    private final SharePointGraphClient graphFactory = new SharePointGraphClient();
-    private final SharePointIntrospector introspector = new SharePointIntrospector(typesMapping);
+    // protected so the OneDrive subclass (SHAREPOINT_ONEDRIVE) can reuse them.
+    protected final SharePointTypesMapping typesMapping = new SharePointTypesMapping();
+    protected final SharePointFeatures features = new SharePointFeatures();
+    protected final SharePointGraphClient graphFactory = new SharePointGraphClient();
+    protected final SharePointIntrospector introspector = new SharePointIntrospector(typesMapping);
 
     @Override
     public ValidateSourceResponse pingSource(ValidateSourceRequest request) {
         try {
             ConnContext ctx = context(request.getRequestInfo());
-            // Validate every configured site; fail with the first unreachable one.
+            // Validate every configured container; fail with the first unreachable one.
             for (SiteCtx s : ctx.sites) {
-                if (!introspector.validateConnection(ctx.client, s.siteId)) {
+                if (!validateContainer(ctx, s)) {
                     return new ValidateSourceResponse(
-                            serverError("Failed to connect to SharePoint site: " + s.siteUrl));
+                            serverError("Failed to connect to container: " + s.siteUrl));
                 }
             }
             return new ValidateSourceResponse(ok());
@@ -404,24 +405,14 @@ public class SharePointDataProvider extends AbstractDataProvider {
         String tenantId = param(info, PARAM_TENANT_ID, true);
         String clientId = param(info, PARAM_CLIENT_ID, true);
         String clientSecret = param(info, PARAM_CLIENT_SECRET, true);
-        String siteUrls = param(info, PARAM_SITE_URLS, false);
-        String siteUrl = param(info, PARAM_SITE_URL, false);
         String authority = param(info, PARAM_AUTHORITY, false);
         String includeLists = param(info, PARAM_INCLUDE_LISTS, false);
         String includeExcel = param(info, PARAM_INCLUDE_EXCEL, false);
         String includeFiles = param(info, PARAM_INCLUDE_FILES, false);
 
-        List<String> urls;
-        if (siteUrls != null && !siteUrls.trim().isEmpty()) {
-            urls = SharePointIntrospector.parsePaths(siteUrls);
-            if (siteUrl != null && !siteUrl.isEmpty()) {
-                log.warn("Both SITE_URLS and SITE_URL are set; using SITE_URLS and ignoring SITE_URL");
-            }
-        } else if (siteUrl != null && !siteUrl.isEmpty()) {
-            urls = Collections.singletonList(siteUrl);
-        } else {
-            throw new IllegalArgumentException("One of SITE_URL or SITE_URLS is required");
-        }
+        // Container entries (site URLs for SharePoint; user UPNs for OneDrive)
+        // and the per-entry SiteCtx are produced by overridable seams.
+        List<String> entries = resolveContainerEntries(info);
 
         GraphServiceClient client = graphFactory.build(tenantId, clientId, clientSecret, authority);
 
@@ -438,33 +429,86 @@ public class SharePointDataProvider extends AbstractDataProvider {
             filePathsBySlug.put(SharePointIntrospector.fileSlugFromPath(p), p);
         }
 
-        // Mint one token shared across all per-site readers (same creds, same
-        // MSAL cache). Only needed when Excel or files are configured.
-        boolean needToken = !excelPathsBySlug.isEmpty() || !filePathsBySlug.isEmpty();
+        // Build the container list up front so we know if any is drive-only
+        // (OneDrive), which needs a token for the drive-reachability ping even
+        // when no Excel/files are configured.
+        Set<String> usedSlugs = new java.util.HashSet<>();
+        List<SiteCtx> containers = new ArrayList<>();
+        boolean anyDriveOnly = false;
+        for (String entry : entries) {
+            SiteCtx s = newContainer(entry);
+            String unique = s.siteSlug;
+            int n = 2;
+            while (!usedSlugs.add(unique)) unique = s.siteSlug + "_" + (n++);
+            s.siteSlug = unique;
+            if (s.siteId == null) anyDriveOnly = true;
+            containers.add(s);
+        }
+
+        // Mint one token shared across all per-container readers + drive pings
+        // (same creds, same MSAL cache).
+        boolean needToken = !excelPathsBySlug.isEmpty() || !filePathsBySlug.isEmpty() || anyDriveOnly;
         String token = needToken
                 ? graphFactory.bearerToken(tenantId, clientId, clientSecret, authority) : null;
+        ctx.token = token;
 
-        ctx.sites = new ArrayList<>();
-        Set<String> usedSlugs = new java.util.HashSet<>();
-        for (String url : urls) {
-            SiteCtx s = new SiteCtx();
-            s.siteUrl = url;
-            s.siteId = graphFactory.siteIdFromUrl(url);
-            String slug = graphFactory.siteSlugFromUrl(url);
-            // Disambiguate the rare case of two sites slugging to the same value.
-            String unique = slug;
-            int n = 2;
-            while (!usedSlugs.add(unique)) unique = slug + "_" + (n++);
-            s.siteSlug = unique;
+        for (SiteCtx s : containers) {
             SharePointWorkbookReader wb = excelPathsBySlug.isEmpty() ? null
-                    : new SharePointWorkbookReader(graphFactory.rawHttpClient(), token, s.siteId, excelPathsBySlug);
+                    : new SharePointWorkbookReader(graphFactory.rawHttpClient(), token, s.driveResourcePath, excelPathsBySlug);
             SharePointFileReader fr = filePathsBySlug.isEmpty() ? null
-                    : new SharePointFileReader(graphFactory.rawHttpClient(), token, s.siteId, filePathsBySlug);
+                    : new SharePointFileReader(graphFactory.rawHttpClient(), token, s.driveResourcePath, filePathsBySlug);
             s.readers = new SharePointReaders(wb, fr);
-            ctx.sites.add(s);
         }
+        ctx.sites = containers;
         ctx.multiSite = ctx.sites.size() > 1;
         return ctx;
+    }
+
+    /**
+     * Resolve the container entries for this connection. Base = SharePoint
+     * sites from SITE_URLS / SITE_URL. Overridden by the OneDrive provider to
+     * read user UPNs.
+     */
+    protected List<String> resolveContainerEntries(RequestInfo info) {
+        String siteUrls = param(info, PARAM_SITE_URLS, false);
+        String siteUrl = param(info, PARAM_SITE_URL, false);
+        if (siteUrls != null && !siteUrls.trim().isEmpty()) {
+            if (siteUrl != null && !siteUrl.isEmpty()) {
+                log.warn("Both SITE_URLS and SITE_URL are set; using SITE_URLS and ignoring SITE_URL");
+            }
+            return SharePointIntrospector.parsePaths(siteUrls);
+        }
+        if (siteUrl != null && !siteUrl.isEmpty()) {
+            return Collections.singletonList(siteUrl);
+        }
+        throw new IllegalArgumentException("One of SITE_URL or SITE_URLS is required");
+    }
+
+    /**
+     * Build a container (SiteCtx) for one entry. Base = a SharePoint site:
+     * siteId set (enables List discovery), driveResourcePath = sites/{id}/drive.
+     * The OneDrive provider overrides this to a user drive (siteId == null,
+     * driveResourcePath = users/{upn}/drive). Readers are attached later.
+     */
+    protected SiteCtx newContainer(String entry) {
+        SiteCtx s = new SiteCtx();
+        s.siteUrl = entry;
+        s.siteId = graphFactory.siteIdFromUrl(entry);
+        s.siteSlug = graphFactory.siteSlugFromUrl(entry);
+        s.driveResourcePath = "sites/" + s.siteId + "/drive";
+        return s;
+    }
+
+    /**
+     * Validate one container is reachable. Base validates the SharePoint site;
+     * the OneDrive provider validates the user's drive. Override as needed.
+     */
+    protected boolean validateContainer(ConnContext ctx, SiteCtx s) {
+        if (s.siteId != null) {
+            return introspector.validateConnection(ctx.client, s.siteId);
+        }
+        // Drive-only container: ping the drive directly.
+        return graphFactory.ping("https://graph.microsoft.com/v1.0/" + s.driveResourcePath, ctx.token);
     }
 
     /**
@@ -525,7 +569,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
         throw new IllegalArgumentException("No configured site matches slug '" + slug + "'");
     }
 
-    private String param(RequestInfo info, String name, boolean required) {
+    protected String param(RequestInfo info, String name, boolean required) {
         if (info.getDataSourceInfo() == null || info.getDataSourceInfo().getParams() == null) {
             if (required) throw new IllegalArgumentException("Missing connection parameters");
             return null;
@@ -537,18 +581,25 @@ public class SharePointDataProvider extends AbstractDataProvider {
         return value;
     }
 
-    private static class ConnContext {
+    protected static class ConnContext {
         GraphServiceClient client;
         Set<String> includeLists;
         List<SiteCtx> sites;
         boolean multiSite;
+        String token; // shared Graph token (null when not needed)
     }
 
-    /** Per-site resolved state. One per configured SITE_URL(S) entry. */
-    private static class SiteCtx {
-        String siteUrl;
-        String siteSlug;
-        String siteId;
+    /**
+     * Per-container resolved state. One per configured site (SharePoint) or
+     * user drive (OneDrive). siteId is null for drive-only containers, which
+     * disables List discovery; driveResourcePath addresses the drive for the
+     * Excel/file readers and the reachability ping.
+     */
+    protected static class SiteCtx {
+        String siteUrl;          // original entry (site URL or user UPN) — for messages
+        String siteSlug;         // collection-name prefix in multi-container connections
+        String siteId;           // SharePoint site id, or null for OneDrive
+        String driveResourcePath; // "sites/{id}/drive" or "users/{upn}/drive"
         SharePointReaders readers; // workbook + file readers; either may be null
     }
 
