@@ -55,13 +55,20 @@ public class SharePointWorkbookReader {
     // identical for both.
     private final String driveResourcePath;
     private final Map<String, String> pathsBySlug;
+    private final TtlGridCache cache; // nullable; disabled cache when null
 
     public SharePointWorkbookReader(OkHttpClient http, String bearerToken, String driveResourcePath,
                                     Map<String, String> pathsBySlug) {
+        this(http, bearerToken, driveResourcePath, pathsBySlug, null);
+    }
+
+    public SharePointWorkbookReader(OkHttpClient http, String bearerToken, String driveResourcePath,
+                                    Map<String, String> pathsBySlug, TtlGridCache cache) {
         this.http = http;
         this.bearerToken = bearerToken;
         this.driveResourcePath = driveResourcePath;
         this.pathsBySlug = pathsBySlug != null ? pathsBySlug : Collections.emptyMap();
+        this.cache = cache;
     }
 
     /** Resolve an INCLUDE_EXCEL file slug back to its configured path. */
@@ -178,18 +185,24 @@ public class SharePointWorkbookReader {
      * is the header row; for named ranges there is no header.
      */
     public List<List<Object>> getTableRange(FileRef f, String tableName) {
-        return gridFromValues(workbookBase(f) + "/tables/" + encodePathSegment(tableName)
+        return loadGrid(workbookBase(f) + "/tables/" + encodePathSegment(tableName)
                 + "/range?$select=values");
     }
 
     public List<List<Object>> getUsedRange(FileRef f, String sheetName) {
-        return gridFromValues(workbookBase(f) + "/worksheets/" + encodePathSegment(sheetName)
+        return loadGrid(workbookBase(f) + "/worksheets/" + encodePathSegment(sheetName)
                 + "/usedRange?$select=values");
     }
 
     public List<List<Object>> getNamedRange(FileRef f, String rangeName) {
-        return gridFromValues(workbookBase(f) + "/names/" + encodePathSegment(rangeName)
+        return loadGrid(workbookBase(f) + "/names/" + encodePathSegment(rangeName)
                 + "/range?$select=values");
+    }
+
+    /** Fetch via the TTL cache when enabled (URL is globally unique — it
+     *  embeds driveId + itemId), else fetch directly. */
+    private List<List<Object>> loadGrid(String url) {
+        return cache != null ? cache.get(url, () -> gridFromValues(url)) : gridFromValues(url);
     }
 
     /** Parse the `values` 2D array from a range/usedRange response. */

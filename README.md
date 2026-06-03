@@ -326,6 +326,16 @@ EDC requests into Graph SDK calls. List columns are discovered via
 `/sites/{id}/lists/{id}/items?$expand=fields(...)` with OData
 `$select`/`$filter`/`$top` pushed down where supported.
 
+## Performance & reliability (v1.1)
+
+Tuned via `framework.properties`:
+
+| Property | Default | Effect |
+|---|---|---|
+| `sharepoint.retry.max` | 3 | Retry budget for throttled/transient raw-REST calls (Workbook + files): retries 429 / 503 / 504, honouring `Retry-After`, else exponential backoff (1s, 2s, 4s, capped 30s). The typed-SDK path (Lists) already retries via Kiota. |
+| `sharepoint.cache.ttl.sec` | 0 (off) | In-pod TTL cache for parsed Excel ranges / file grids. A small value (30–60s) collapses the describe+fetch double-read and refresh bursts into one Graph round-trip, at the cost of up to TTL seconds of staleness. Only the bounded parsed grid is cached, never the raw download stream. |
+| `sharepoint.connection.timeout.sec` / `sharepoint.read.timeout.sec` | 30 / 60 | Raw-REST HTTP timeouts. |
+
 ## Known limitations
 
 - **Excel-in-SharePoint:** implemented in v1.1 (tables, worksheet

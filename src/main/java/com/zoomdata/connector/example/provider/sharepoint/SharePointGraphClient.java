@@ -81,15 +81,24 @@ public class SharePointGraphClient {
     // Plain client with our configured timeouts; bearer header added per call.
     private final OkHttpClient rawHttpClient;
 
+    // Pod-lifetime TTL grid cache (opt-in; disabled when ttl <= 0).
+    private final TtlGridCache gridCache;
+    private static final int CACHE_MAX_ENTRIES = 200;
+
+    private static final int DEFAULT_MAX_RETRIES = 3;
+
     public SharePointGraphClient() {
         Properties props = loadFrameworkProperties();
         this.connectTimeoutSec = parseLong(props.getProperty("sharepoint.connection.timeout.sec"),
                 DEFAULT_CONNECT_TIMEOUT_SEC);
         this.readTimeoutSec = parseLong(props.getProperty("sharepoint.read.timeout.sec"),
                 DEFAULT_READ_TIMEOUT_SEC);
-        this.rawHttpClient = buildRawHttpClient(connectTimeoutSec, readTimeoutSec);
-        log.info("SharePoint Graph client configured: connectTimeout={}s, readTimeout={}s",
-                connectTimeoutSec, readTimeoutSec);
+        int maxRetries = (int) parseLong(props.getProperty("sharepoint.retry.max"), DEFAULT_MAX_RETRIES);
+        this.rawHttpClient = buildRawHttpClient(connectTimeoutSec, readTimeoutSec, maxRetries);
+        long cacheTtl = parseLong(props.getProperty("sharepoint.cache.ttl.sec"), 0L);
+        this.gridCache = new TtlGridCache(cacheTtl, CACHE_MAX_ENTRIES);
+        log.info("SharePoint Graph client configured: connectTimeout={}s, readTimeout={}s, maxRetries={}, cacheTtl={}s",
+                connectTimeoutSec, readTimeoutSec, maxRetries, cacheTtl);
     }
 
     /**
@@ -99,11 +108,18 @@ public class SharePointGraphClient {
     SharePointGraphClient(long connectTimeoutSec, long readTimeoutSec) {
         this.connectTimeoutSec = connectTimeoutSec;
         this.readTimeoutSec = readTimeoutSec;
-        this.rawHttpClient = buildRawHttpClient(connectTimeoutSec, readTimeoutSec);
+        this.rawHttpClient = buildRawHttpClient(connectTimeoutSec, readTimeoutSec, DEFAULT_MAX_RETRIES);
+        this.gridCache = new TtlGridCache(0L, CACHE_MAX_ENTRIES);
     }
 
-    private static OkHttpClient buildRawHttpClient(long connectSec, long readSec) {
+    /** Pod-lifetime grid cache (opt-in via sharepoint.cache.ttl.sec). */
+    public TtlGridCache gridCache() {
+        return gridCache;
+    }
+
+    private static OkHttpClient buildRawHttpClient(long connectSec, long readSec, int maxRetries) {
         return new OkHttpClient.Builder()
+                .addInterceptor(new GraphRetryInterceptor(maxRetries))
                 .connectTimeout(Duration.ofSeconds(connectSec))
                 .readTimeout(Duration.ofSeconds(readSec))
                 .writeTimeout(Duration.ofSeconds(readSec))

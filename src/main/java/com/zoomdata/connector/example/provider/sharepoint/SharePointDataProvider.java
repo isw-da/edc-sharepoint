@@ -475,9 +475,11 @@ public class SharePointDataProvider extends AbstractDataProvider {
 
         for (SiteCtx s : containers) {
             SharePointWorkbookReader wb = excelPathsBySlug.isEmpty() ? null
-                    : new SharePointWorkbookReader(graphFactory.rawHttpClient(), token, s.driveResourcePath, excelPathsBySlug);
+                    : new SharePointWorkbookReader(graphFactory.rawHttpClient(), token, s.driveResourcePath,
+                            excelPathsBySlug, graphFactory.gridCache());
             SharePointFileReader fr = filePathsBySlug.isEmpty() ? null
-                    : new SharePointFileReader(graphFactory.rawHttpClient(), token, s.driveResourcePath, filePathsBySlug);
+                    : new SharePointFileReader(graphFactory.rawHttpClient(), token, s.driveResourcePath,
+                            filePathsBySlug, graphFactory.gridCache());
             s.readers = new SharePointReaders(wb, fr);
         }
         ctx.sites = containers;

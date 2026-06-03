@@ -50,13 +50,20 @@ public class SharePointFileReader {
     // "sites/{siteId}/drive" (SharePoint) or "users/{upn}/drive" (OneDrive).
     private final String driveResourcePath;
     private final Map<String, String> pathsBySlug;
+    private final TtlGridCache cache; // nullable; disabled cache when null
 
     public SharePointFileReader(OkHttpClient http, String bearerToken, String driveResourcePath,
                                 Map<String, String> pathsBySlug) {
+        this(http, bearerToken, driveResourcePath, pathsBySlug, null);
+    }
+
+    public SharePointFileReader(OkHttpClient http, String bearerToken, String driveResourcePath,
+                                Map<String, String> pathsBySlug, TtlGridCache cache) {
         this.http = http;
         this.bearerToken = bearerToken;
         this.driveResourcePath = driveResourcePath;
         this.pathsBySlug = pathsBySlug != null ? pathsBySlug : java.util.Collections.emptyMap();
+        this.cache = cache;
     }
 
     public String pathForSlug(String slug) {
@@ -76,8 +83,17 @@ public class SharePointFileReader {
     /**
      * Download + parse the file at the given drive path into a 2D grid.
      * First inner list is the header (column names); the rest are data rows.
+     * Served from the TTL cache when enabled (only the bounded parsed grid is
+     * cached, never the raw download stream).
      */
     public List<List<Object>> readGrid(String path) {
+        if (cache != null) {
+            return cache.get(driveResourcePath + "::" + path, () -> readGridUncached(path));
+        }
+        return readGridUncached(path);
+    }
+
+    private List<List<Object>> readGridUncached(String path) {
         String e = ext(path);
         try (InputStream in = download(path)) {
             switch (e) {
