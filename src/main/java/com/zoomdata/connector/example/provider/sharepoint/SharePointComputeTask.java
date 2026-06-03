@@ -329,7 +329,33 @@ public class SharePointComputeTask implements IComputeTask {
         if (type == FieldType.INTEGER || type == FieldType.DOUBLE) {
             return value;
         }
+        if (type == FieldType.DATE) {
+            return odataDateLiteral(value);
+        }
         return "'" + value.replace("'", "''") + "'";
+    }
+
+    /**
+     * Format a date filter value as an OData dateTime literal (UNQUOTED ISO
+     * 8601 in UTC), e.g. fields/DueDate ge 2026-01-01T00:00:00Z. Graph rejects
+     * quoted-string comparisons on dateTime list columns, which is why v1.0
+     * date filters were weak. Composer sends DATE filter values as epoch
+     * milliseconds; we also accept an already-ISO value and pass it through.
+     */
+    static String odataDateLiteral(String value) {
+        String v = value.trim();
+        try {
+            long ms = Long.parseLong(v);
+            return java.time.Instant.ofEpochMilli(ms)
+                    .atZone(java.time.ZoneOffset.UTC)
+                    .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'"));
+        } catch (NumberFormatException notEpoch) {
+            // Already an ISO 8601 string (possibly quoted) — strip quotes, keep as-is.
+            if (v.length() >= 2 && v.startsWith("'") && v.endsWith("'")) {
+                v = v.substring(1, v.length() - 1);
+            }
+            return v;
+        }
     }
 
     // ----- Record building ----------------------------------------------

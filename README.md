@@ -157,11 +157,22 @@ In the target tenant's Azure portal:
    - Application (client) ID (Overview page)
    - Client secret (from step 2)
 
-**Tighter security alternative:** use `Sites.Selected` instead of
-`Sites.Read.All`, then grant the app access to specific sites via
-[Graph site permissions](https://learn.microsoft.com/graph/api/site-post-permissions).
-Tenant-wide read becomes per-site read, at the cost of one provisioning
-step per site.
+**Tighter security alternative (recommended for security-conscious tenants):**
+grant the app `Sites.Selected` instead of `Sites.Read.All`. The app then has
+**no** access to any site until a SharePoint admin grants it per site —
+nothing tenant-wide. Use the helper:
+
+```bash
+tools/grant-site-access.sh \
+  --site-url https://contoso.sharepoint.com/sites/sales \
+  --app-id   <edc-app-client-id> \
+  --role     read
+```
+
+Run it as a SharePoint/Global admin (`az login` first). It resolves the site,
+grants the app a per-site role via Graph, and fails with a clear message if
+the running identity lacks the rights (`Sites.FullControl.All` /
+SharePoint-admin). One run per site you want the connector to read.
 
 ### Build
 
@@ -352,12 +363,14 @@ Tuned via `framework.properties`:
   `Prefer: HonorNonIndexedQueriesWarningMayFailRandomly` header, which the
   connector sets by default. Some queries may still fail with
   `tooManyItems`; index the column in SharePoint to fix.
-- **Date pushdown:** datetime columns are typed as DATE for downstream QE
-  use but filter pushdown for date comparisons hasn't been hardened on
-  ISO 8601 strings yet. If date filters misbehave, treat the column as
-  STRING via a custom view.
-- **No pushdown for aggregations.** All aggregation is QE-side; this
-  matches the GraphQL EDC and is constrained by the EDC framework.
+- **Date pushdown (v1.1):** date filters on List columns now push down as
+  proper OData dateTime literals (unquoted ISO 8601 UTC; Composer's epoch-
+  millis filter values are converted). Formatter unit-tested; full E2E of a
+  date-filtered query needs a licensed Composer QE to validate.
+- **No pushdown for aggregations.** Aggregation pushdown to Graph is not
+  possible — Microsoft Graph silently ignores OData `$apply` on SharePoint
+  list items (re-confirmed: `groupby` on a 10-row list returns all 10 rows).
+  All aggregation is therefore QE-side, as in v1.
 
 ## Related
 
