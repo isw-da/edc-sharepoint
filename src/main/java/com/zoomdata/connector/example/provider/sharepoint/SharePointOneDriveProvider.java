@@ -87,17 +87,20 @@ public class SharePointOneDriveProvider extends SharePointDataProvider {
         return new GenericDescriptionProvider(ONEDRIVE_TYPE)
                 .svgIcon("/sharepoint-icon.svg")
                 .addParameters(
+                        stringParameter(PARAM_AUTH_MODE)
+                                .description("CLIENT_SECRET (default), CLIENT_CERTIFICATE, or MANAGED_IDENTITY"))
+                .addParameters(
                         stringParameter(PARAM_TENANT_ID)
-                                .isRequired(true)
-                                .description("Azure AD tenant ID (GUID or domain, e.g. contoso.onmicrosoft.com)"))
+                                .description("Azure AD tenant ID (GUID or domain). Required for CLIENT_SECRET/CLIENT_CERTIFICATE."))
                 .addParameters(
                         stringParameter(PARAM_CLIENT_ID)
-                                .isRequired(true)
-                                .description("App registration client (application) ID"))
+                                .description("App registration client (application) ID. Required except for system-assigned MANAGED_IDENTITY."))
                 .addParameters(
                         passwordParameter(PARAM_CLIENT_SECRET)
-                                .isRequired(true)
-                                .description("App registration client secret"))
+                                .description("App registration client secret. Required for AUTH_MODE=CLIENT_SECRET."))
+                .addParameters(
+                        passwordParameter(PARAM_CLIENT_CERT_PEM)
+                                .description("PEM contents (private key + certificate). Required for AUTH_MODE=CLIENT_CERTIFICATE."))
                 .addParameters(
                         stringParameter(PARAM_USER_UPN)
                                 .description("Single user principal name, e.g. jane@contoso.com. Use this OR USER_UPNS."))

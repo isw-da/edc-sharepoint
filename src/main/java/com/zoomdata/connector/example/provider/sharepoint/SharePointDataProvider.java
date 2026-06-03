@@ -86,6 +86,8 @@ public class SharePointDataProvider extends AbstractDataProvider {
     protected static final String PARAM_INCLUDE_EXCEL = "INCLUDE_EXCEL";
     protected static final String PARAM_INCLUDE_FILES = "INCLUDE_FILES";  // v1.1 CSV/TSV/JSON
     protected static final String PARAM_AUTHORITY = "AUTHORITY";
+    protected static final String PARAM_AUTH_MODE = "AUTH_MODE";          // v1.1: CLIENT_SECRET|CLIENT_CERTIFICATE|MANAGED_IDENTITY
+    protected static final String PARAM_CLIENT_CERT_PEM = "CLIENT_CERT_PEM"; // v1.1: PEM (key+cert) for CLIENT_CERTIFICATE
 
     // protected so the OneDrive subclass (SHAREPOINT_ONEDRIVE) can reuse them.
     protected final SharePointTypesMapping typesMapping = new SharePointTypesMapping();
@@ -335,17 +337,20 @@ public class SharePointDataProvider extends AbstractDataProvider {
                 // resolve from classpath root regardless of caller package.
                 .svgIcon("/sharepoint-icon.svg")
                 .addParameters(
+                        stringParameter(PARAM_AUTH_MODE)
+                                .description("CLIENT_SECRET (default), CLIENT_CERTIFICATE, or MANAGED_IDENTITY"))
+                .addParameters(
                         stringParameter(PARAM_TENANT_ID)
-                                .isRequired(true)
-                                .description("Azure AD tenant ID (GUID or domain, e.g. contoso.onmicrosoft.com)"))
+                                .description("Azure AD tenant ID (GUID or domain). Required for CLIENT_SECRET/CLIENT_CERTIFICATE."))
                 .addParameters(
                         stringParameter(PARAM_CLIENT_ID)
-                                .isRequired(true)
-                                .description("App registration client (application) ID"))
+                                .description("App registration client (application) ID. Required except for system-assigned MANAGED_IDENTITY."))
                 .addParameters(
                         passwordParameter(PARAM_CLIENT_SECRET)
-                                .isRequired(true)
-                                .description("App registration client secret"))
+                                .description("App registration client secret. Required for AUTH_MODE=CLIENT_SECRET."))
+                .addParameters(
+                        passwordParameter(PARAM_CLIENT_CERT_PEM)
+                                .description("PEM contents (private key + certificate). Required for AUTH_MODE=CLIENT_CERTIFICATE."))
                 .addParameters(
                         stringParameter(PARAM_SITE_URL)
                                 .description("Single SharePoint site URL, e.g. "
@@ -410,19 +415,28 @@ public class SharePointDataProvider extends AbstractDataProvider {
      * connections keep the exact v1 names.
      */
     private ConnContext context(RequestInfo info) {
-        String tenantId = param(info, PARAM_TENANT_ID, true);
-        String clientId = param(info, PARAM_CLIENT_ID, true);
-        String clientSecret = param(info, PARAM_CLIENT_SECRET, true);
+        // Auth params are read loosely; SharePointGraphClient.credential()
+        // enforces what each AUTH_MODE requires (e.g. MANAGED_IDENTITY needs
+        // no secret/tenant). Default mode = CLIENT_SECRET (v1 behaviour).
+        String authMode = param(info, PARAM_AUTH_MODE, false);
+        String tenantId = param(info, PARAM_TENANT_ID, false);
+        String clientId = param(info, PARAM_CLIENT_ID, false);
+        String clientSecret = param(info, PARAM_CLIENT_SECRET, false);
+        String clientCertPem = param(info, PARAM_CLIENT_CERT_PEM, false);
         String authority = param(info, PARAM_AUTHORITY, false);
         String includeLists = param(info, PARAM_INCLUDE_LISTS, false);
         String includeExcel = param(info, PARAM_INCLUDE_EXCEL, false);
         String includeFiles = param(info, PARAM_INCLUDE_FILES, false);
 
+        SharePointGraphClient.GraphAuth auth = new SharePointGraphClient.GraphAuth(
+                tenantId, clientId, SharePointGraphClient.GraphAuth.parseMode(authMode),
+                clientSecret, clientCertPem, authority);
+
         // Container entries (site URLs for SharePoint; user UPNs for OneDrive)
         // and the per-entry SiteCtx are produced by overridable seams.
         List<String> entries = resolveContainerEntries(info);
 
-        GraphServiceClient client = graphFactory.build(tenantId, clientId, clientSecret, authority);
+        GraphServiceClient client = graphFactory.build(auth);
 
         ConnContext ctx = new ConnContext();
         ctx.client = client;
@@ -456,8 +470,7 @@ public class SharePointDataProvider extends AbstractDataProvider {
         // Mint one token shared across all per-container readers + drive pings
         // (same creds, same MSAL cache).
         boolean needToken = !excelPathsBySlug.isEmpty() || !filePathsBySlug.isEmpty() || anyDriveOnly;
-        String token = needToken
-                ? graphFactory.bearerToken(tenantId, clientId, clientSecret, authority) : null;
+        String token = needToken ? graphFactory.bearerToken(auth) : null;
         ctx.token = token;
 
         for (SiteCtx s : containers) {

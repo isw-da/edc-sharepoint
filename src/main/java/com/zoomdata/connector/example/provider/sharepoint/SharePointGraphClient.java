@@ -27,9 +27,11 @@
  */
 package com.zoomdata.connector.example.provider.sharepoint;
 
+import com.azure.core.credential.TokenCredential;
 import com.azure.core.credential.TokenRequestContext;
-import com.azure.identity.ClientSecretCredential;
+import com.azure.identity.ClientCertificateCredentialBuilder;
 import com.azure.identity.ClientSecretCredentialBuilder;
+import com.azure.identity.ManagedIdentityCredentialBuilder;
 import com.microsoft.graph.core.authentication.AzureIdentityAccessTokenProvider;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
 import com.microsoft.kiota.authentication.BaseBearerTokenAuthenticationProvider;
@@ -68,7 +70,7 @@ public class SharePointGraphClient {
     // Workbook path (bearerToken) reuses the SAME ClientSecretCredential —
     // and therefore the same MSAL token cache — as the typed SDK path. A
     // separate credential would mean a second OAuth round-trip per connection.
-    private final ConcurrentMap<String, ClientSecretCredential> credentialCache = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, TokenCredential> credentialCache = new ConcurrentHashMap<>();
 
     // Resolved once at instance construction from framework.properties.
     private final long connectTimeoutSec;
@@ -129,29 +131,108 @@ public class SharePointGraphClient {
     }
 
     /**
-     * Acquire a Graph bearer token for the given credentials, reusing the
-     * cached ClientSecretCredential (and its MSAL token cache). Synchronous —
-     * azure-identity caches and refreshes the token internally, so repeated
-     * calls within a token's lifetime do not hit the network.
+     * Acquire a Graph bearer token. Synchronous — azure-identity caches and
+     * refreshes the token internally, so repeated calls within a token's
+     * lifetime do not hit the network.
      */
-    public String bearerToken(String tenantId, String clientId, String clientSecret, String authority) {
-        if (tenantId == null || tenantId.isEmpty()) throw new IllegalArgumentException("TENANT_ID is required");
-        if (clientId == null || clientId.isEmpty()) throw new IllegalArgumentException("CLIENT_ID is required");
-        if (clientSecret == null || clientSecret.isEmpty()) throw new IllegalArgumentException("CLIENT_SECRET is required");
-        String authorityHost = (authority != null && !authority.isEmpty()) ? authority : DEFAULT_AUTHORITY;
-        ClientSecretCredential cred = credential(tenantId, clientId, clientSecret, authorityHost);
-        return cred.getTokenSync(new TokenRequestContext().addScopes(GRAPH_SCOPE)).getToken();
+    public String bearerToken(GraphAuth auth) {
+        return credential(auth).getTokenSync(new TokenRequestContext().addScopes(GRAPH_SCOPE)).getToken();
     }
 
-    /** Get-or-build a ClientSecretCredential, cached by the same key as the SDK client. */
-    private ClientSecretCredential credential(String tenantId, String clientId, String clientSecret, String authorityHost) {
-        String key = cacheKey(tenantId, clientId, clientSecret, authorityHost);
-        return credentialCache.computeIfAbsent(key, k -> new ClientSecretCredentialBuilder()
-                .clientId(clientId)
-                .tenantId(tenantId)
-                .clientSecret(clientSecret)
-                .authorityHost(authorityHost)
-                .build());
+    /** Back-compat overload: client-secret auth. */
+    public String bearerToken(String tenantId, String clientId, String clientSecret, String authority) {
+        return bearerToken(GraphAuth.secret(tenantId, clientId, clientSecret, authority));
+    }
+
+    /**
+     * Get-or-build a TokenCredential for the requested auth mode, cached so
+     * the MSAL token cache survives across requests. v1.1 supports:
+     *   CLIENT_SECRET       — client id + secret (v1 default)
+     *   CLIENT_CERTIFICATE  — client id + PEM (private key + cert)
+     *   MANAGED_IDENTITY    — ambient Azure identity; optional client id for
+     *                         a user-assigned identity. Only works on Azure.
+     */
+    private TokenCredential credential(GraphAuth a) {
+        String key = cacheKey(a);
+        return credentialCache.computeIfAbsent(key, k -> {
+            switch (a.mode) {
+                case CLIENT_CERTIFICATE: {
+                    require(a.tenantId, "TENANT_ID");
+                    require(a.clientId, "CLIENT_ID");
+                    require(a.clientCertPem, "CLIENT_CERT_PEM");
+                    return new ClientCertificateCredentialBuilder()
+                            .tenantId(a.tenantId)
+                            .clientId(a.clientId)
+                            .pemCertificate(new java.io.ByteArrayInputStream(
+                                    a.clientCertPem.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                            .authorityHost(a.authorityHost())
+                            .build();
+                }
+                case MANAGED_IDENTITY: {
+                    // No tenant/secret: the platform-assigned identity is used.
+                    // A client id selects a specific user-assigned identity.
+                    ManagedIdentityCredentialBuilder b = new ManagedIdentityCredentialBuilder();
+                    if (a.clientId != null && !a.clientId.isEmpty()) b.clientId(a.clientId);
+                    return b.build();
+                }
+                case CLIENT_SECRET:
+                default: {
+                    require(a.tenantId, "TENANT_ID");
+                    require(a.clientId, "CLIENT_ID");
+                    require(a.clientSecret, "CLIENT_SECRET");
+                    return new ClientSecretCredentialBuilder()
+                            .clientId(a.clientId)
+                            .tenantId(a.tenantId)
+                            .clientSecret(a.clientSecret)
+                            .authorityHost(a.authorityHost())
+                            .build();
+                }
+            }
+        });
+    }
+
+    private static void require(String v, String name) {
+        if (v == null || v.isEmpty()) {
+            throw new IllegalArgumentException(name + " is required for this AUTH_MODE");
+        }
+    }
+
+    /** Auth modes supported by the connector. */
+    public enum AuthMode { CLIENT_SECRET, CLIENT_CERTIFICATE, MANAGED_IDENTITY }
+
+    /** Immutable bundle of auth inputs for one connection. */
+    public static final class GraphAuth {
+        final String tenantId, clientId, clientSecret, clientCertPem, authority;
+        final AuthMode mode;
+
+        public GraphAuth(String tenantId, String clientId, AuthMode mode,
+                         String clientSecret, String clientCertPem, String authority) {
+            this.tenantId = tenantId;
+            this.clientId = clientId;
+            this.mode = mode != null ? mode : AuthMode.CLIENT_SECRET;
+            this.clientSecret = clientSecret;
+            this.clientCertPem = clientCertPem;
+            this.authority = authority;
+        }
+
+        static GraphAuth secret(String tenantId, String clientId, String clientSecret, String authority) {
+            return new GraphAuth(tenantId, clientId, AuthMode.CLIENT_SECRET, clientSecret, null, authority);
+        }
+
+        String authorityHost() {
+            return (authority != null && !authority.isEmpty()) ? authority : DEFAULT_AUTHORITY;
+        }
+
+        /** Parse the AUTH_MODE connection param; defaults to CLIENT_SECRET. */
+        public static AuthMode parseMode(String raw) {
+            if (raw == null || raw.trim().isEmpty()) return AuthMode.CLIENT_SECRET;
+            try {
+                return AuthMode.valueOf(raw.trim().toUpperCase());
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("Unknown AUTH_MODE '" + raw
+                        + "' (expected CLIENT_SECRET, CLIENT_CERTIFICATE, or MANAGED_IDENTITY)");
+            }
+        }
     }
 
     private Properties loadFrameworkProperties() {
@@ -178,31 +259,24 @@ public class SharePointGraphClient {
         }
     }
 
+    /** Back-compat overload: client-secret auth. */
     public GraphServiceClient build(String tenantId, String clientId, String clientSecret, String authority) {
-        if (tenantId == null || tenantId.isEmpty()) {
-            throw new IllegalArgumentException("TENANT_ID is required");
-        }
-        if (clientId == null || clientId.isEmpty()) {
-            throw new IllegalArgumentException("CLIENT_ID is required");
-        }
-        if (clientSecret == null || clientSecret.isEmpty()) {
-            throw new IllegalArgumentException("CLIENT_SECRET is required");
-        }
+        return build(GraphAuth.secret(tenantId, clientId, clientSecret, authority));
+    }
 
-        String authorityHost = (authority != null && !authority.isEmpty()) ? authority : DEFAULT_AUTHORITY;
-        String key = cacheKey(tenantId, clientId, clientSecret, authorityHost);
-
+    public GraphServiceClient build(GraphAuth auth) {
+        String key = cacheKey(auth);
         return cache.computeIfAbsent(key, k -> {
             int size = cache.size();
             if (size >= CACHE_SIZE_WARN_THRESHOLD) {
-                log.warn("Graph client cache has {} entries (tenant={} clientId={}). "
+                log.warn("Graph client cache has {} entries (tenant={} clientId={} mode={}). "
                         + "Mass secret rotation or many distinct tenants? Restart the pod to flush.",
-                        size, tenantId, clientId);
+                        size, auth.tenantId, auth.clientId, auth.mode);
             } else {
-                log.info("Building new GraphServiceClient (tenant={}, clientId={}, cache size now {})",
-                        tenantId, clientId, size + 1);
+                log.info("Building new GraphServiceClient (tenant={}, clientId={}, mode={}, cache size now {})",
+                        auth.tenantId, auth.clientId, auth.mode, size + 1);
             }
-            ClientSecretCredential credential = credential(tenantId, clientId, clientSecret, authorityHost);
+            TokenCredential credential = credential(auth);
 
             // v1.1: build the OkHttp client ourselves so we can apply our
             // configured timeouts. KiotaClientFactory.create() returns a
@@ -227,14 +301,15 @@ public class SharePointGraphClient {
     }
 
     /**
-     * Cache key includes a hash of the secret so a rotated secret produces a
-     * different key and triggers a rebuild. The secret itself is never
-     * stored in the key — only its hash, alongside the (already public)
-     * tenant + client + authority.
+     * Cache key over the auth identity + a hash of the secret/cert so a
+     * rotated credential produces a new key and triggers a rebuild. The
+     * secret/cert itself is never stored in the key — only its hash,
+     * alongside the (already public) tenant + client + mode + authority.
      */
-    private String cacheKey(String tenantId, String clientId, String secret, String authority) {
-        return tenantId + "|" + clientId + "|" + authority
-                + "|" + Integer.toHexString(Objects.hash(tenantId, clientId, secret, authority));
+    private String cacheKey(GraphAuth a) {
+        return a.tenantId + "|" + a.clientId + "|" + a.mode + "|" + a.authorityHost()
+                + "|" + Integer.toHexString(Objects.hash(a.tenantId, a.clientId, a.mode,
+                        a.clientSecret, a.clientCertPem, a.authorityHost()));
     }
 
     /** Test/diagnostic helper. */

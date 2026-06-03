@@ -119,6 +119,24 @@ at that `SERVICE_NAME`.
 - A running Simba Intelligence instance ([setup guide](https://github.com/isw-da/simba-intelligence-skill))
 - An Azure app registration with Graph application permissions (see below)
 
+### Authentication modes (v1.1)
+
+Set `AUTH_MODE` on the connection (applies to both the SharePoint and
+OneDrive connectors):
+
+| `AUTH_MODE` | Required params | Status |
+|---|---|---|
+| `CLIENT_SECRET` (default) | `TENANT_ID`, `CLIENT_ID`, `CLIENT_SECRET` | validated E2E |
+| `CLIENT_CERTIFICATE` | `TENANT_ID`, `CLIENT_ID`, `CLIENT_CERT_PEM` (PEM = private key + cert) | validated E2E (token + Graph call) |
+| `MANAGED_IDENTITY` | none (optional `CLIENT_ID` for a user-assigned identity) | wired; **only works on Azure-hosted SI** (AKS/VM with an assigned identity) — validate there, not in a local kind cluster |
+
+Certificate auth: register the **public** cert on the app
+(`az ad app credential reset --id <appId> --cert @cert.pem --append`), and
+put the matching **private key + cert** PEM in `CLIENT_CERT_PEM`. Preferred
+over a client secret for security-sensitive tenants (no shared secret, and
+cert rotation is independent). Delegated / device-code auth is not in v1.1
+(awkward for a headless EDC; revisit on demand).
+
 ### Azure app registration
 
 In the target tenant's Azure portal:
